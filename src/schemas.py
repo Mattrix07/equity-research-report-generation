@@ -128,6 +128,36 @@ class SectionOutput(BaseModel):
     tables: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class LLMOpinion(BaseModel):
+    agent_name: str
+    model: str
+    role: str
+    recommendation: str = "REVIEW"
+    confidence: int = 50
+    target_price: float | None = None
+    implied_upside: float | None = None
+    thesis: str = ""
+    valuation_view: str = ""
+    key_assumptions: list[str] = Field(default_factory=list)
+    key_risks: list[str] = Field(default_factory=list)
+    challenge_to_consensus: str = ""
+    evidence_gaps: list[str] = Field(default_factory=list)
+    raw_response: str = ""
+    error: str | None = None
+
+
+class LLMCommitteeOutput(BaseModel):
+    enabled: bool = False
+    opinions: list[LLMOpinion] = Field(default_factory=list)
+    final_recommendation: str | None = None
+    final_target_price: float | None = None
+    final_confidence: int | None = None
+    final_thesis: str = ""
+    final_risks: list[str] = Field(default_factory=list)
+    final_evidence_gaps: list[str] = Field(default_factory=list)
+    synthesis_error: str | None = None
+
+
 class FullReport(BaseModel):
     plan: ReportPlan
     snapshot: MarketSnapshot
@@ -141,4 +171,5 @@ class FullReport(BaseModel):
     recommendation: str
     target_price: float | None
     upside_downside: float | None
+    llm_committee: LLMCommitteeOutput | None = None
     html_path: str | None = None
