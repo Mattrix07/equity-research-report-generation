@@ -5,6 +5,7 @@ from pathlib import Path
 
 from src.agents.assumption_derivation_agent import assumptions_to_scenario_assumptions, derive_dynamic_assumptions
 from src.agents.company_classifier_agent import classify_company
+from src.agents.evidence_agent import build_company_evidence_pack
 from src.agents.financial_model_planner_agent import build_financial_model_plan
 from src.agents.llm_committee import run_llm_committee_sync
 from src.agents.report_agents import (
@@ -36,8 +37,9 @@ from src.engines.forecast_engine import build_default_assumptions, run_forecast
 from src.engines.sensitivity_engine import growth_margin_sensitivity, wacc_terminal_growth_sensitivity
 from src.engines.technical_engine import run_technical_analysis
 from src.report.deep_excel_exporter import export_excel_model
+from src.report.evidence_excel_overlay import apply_evidence_overlay
 from src.report.renderer import render_report
-from src.schemas import DynamicValuationResult, FullReport, LLMCommitteeOutput, ReportRequest, SectionOutput
+from src.schemas import CompanyEvidencePack, DynamicValuationResult, FullReport, LLMCommitteeOutput, ReportRequest, SectionOutput
 
 DEFAULT_PEERS = {
     "Technology": ["MSFT", "GOOGL", "META", "ORCL"],
@@ -162,6 +164,24 @@ def _financial_model_plan_section(model_plan) -> SectionOutput:
     )
 
 
+def _company_evidence_section(evidence: CompanyEvidencePack) -> SectionOutput:
+    rows = [item.model_dump() for item in evidence.evidence_items[:20]]
+    return SectionOutput(
+        title="Company-specific source evidence",
+        narrative=(
+            "This section shows the source evidence available to populate the Excel model and sector-specific tabs. "
+            "LLM enrichment is used only when enabled; otherwise the model uses deterministic evidence from market data and flags gaps."
+        ),
+        bullets=[
+            f"Evidence items collected: {len(evidence.evidence_items)}",
+            f"Source URLs supplied: {len(evidence.source_urls)}",
+            *[f"Evidence gap: {gap}" for gap in evidence.gaps[:6]],
+            *[f"Warning: {warning}" for warning in evidence.warnings[:4]],
+        ],
+        tables=[{"name": "Evidence sample", "rows": rows}],
+    )
+
+
 def generate_report(request: ReportRequest) -> FullReport:
     snapshot = fetch_market_snapshot(request.ticker, request.company_name)
     if request.current_price:
@@ -183,6 +203,14 @@ def generate_report(request: ReportRequest) -> FullReport:
     company_classification = classify_company(snapshot, historicals)
     dynamic_assumptions = derive_dynamic_assumptions(snapshot, historicals, company_classification)
     financial_model_plan = build_financial_model_plan(snapshot, historicals, company_classification, dynamic_assumptions)
+    company_evidence = build_company_evidence_pack(
+        snapshot=snapshot,
+        historicals=historicals,
+        classification=company_classification,
+        dynamic_assumptions=dynamic_assumptions,
+        model_plan=financial_model_plan,
+        source_urls=request.source_urls,
+    )
 
     assumptions = build_default_assumptions(historicals)
     assumptions["base"] = assumptions_to_scenario_assumptions(assumptions["base"], dynamic_assumptions)
@@ -249,6 +277,7 @@ def generate_report(request: ReportRequest) -> FullReport:
         front_page_agent(snapshot, recommendation, target_price, upside),
         executive_summary_agent(snapshot, dcfs["base"], recommendation),
         _financial_model_plan_section(financial_model_plan),
+        _company_evidence_section(company_evidence),
         _dynamic_valuation_section(dynamic_valuation),
         _llm_committee_section(llm_committee),
         SectionOutput(
@@ -291,6 +320,7 @@ def generate_report(request: ReportRequest) -> FullReport:
         company_classification=company_classification,
         dynamic_assumptions=dynamic_assumptions,
         financial_model_plan=financial_model_plan,
+        company_evidence=company_evidence,
         dynamic_valuation=dynamic_valuation,
         llm_committee=llm_committee,
     )
@@ -308,4 +338,5 @@ def generate_report(request: ReportRequest) -> FullReport:
     html_path = render_report(report, report_dir, chart_paths=chart_paths)
     report.html_path = html_path
     report.excel_model_path = export_excel_model(report, model_dir)
+    report.excel_model_path = apply_evidence_overlay(report, report.excel_model_path)
     return report
