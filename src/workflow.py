@@ -36,17 +36,17 @@ from src.engines.dynamic_valuation_engine import run_dynamic_valuation
 from src.engines.forecast_engine import build_default_assumptions, run_forecast
 from src.engines.sensitivity_engine import growth_margin_sensitivity, wacc_terminal_growth_sensitivity
 from src.engines.technical_engine import run_technical_analysis
-from src.report.validated_excel_exporter import export_excel_model
+from src.report.dcf_led_excel_exporter import export_excel_model
 from src.report.evidence_excel_overlay import apply_evidence_overlay
 from src.report.renderer import render_report
 from src.schemas import CompanyEvidencePack, DynamicValuationResult, FullReport, LLMCommitteeOutput, ReportRequest, SectionOutput
 
 DEFAULT_PEERS = {
-    "Technology": ["MSFT", "GOOGL", "META", "ORCL"],
-    "Healthcare": ["JNJ", "PFE", "MRK", "ABBV"],
-    "Financial Services": ["JPM", "BAC", "WFC", "MS"],
-    "Consumer Cyclical": ["AMZN", "HD", "MCD", "NKE"],
-    "Communication Services": ["GOOGL", "META", "NFLX", "DIS"],
+    "Technology": ["MSFT", "GOOGL", "META", "ORCL", "IBM"],
+    "Healthcare": ["JNJ", "PFE", "MRK", "ABBV", "BMY"],
+    "Financial Services": ["JPM", "BAC", "WFC", "MS", "C"],
+    "Consumer Cyclical": ["AMZN", "HD", "MCD", "NKE", "SBUX"],
+    "Communication Services": ["GOOGL", "META", "NFLX", "DIS", "CMCSA"],
 }
 
 
@@ -112,20 +112,20 @@ def _dynamic_valuation_section(dynamic: DynamicValuationResult) -> SectionOutput
             outputs.append({"method": method, "output": str(output)[:1200]})
 
     return SectionOutput(
-        title="Dynamic valuation router and committee output",
+        title="12-month DCF-led valuation output",
         narrative=dynamic.investment_thesis,
         bullets=[
             f"Primary valuation method: {dynamic.primary_method}",
             f"Selected methods: {', '.join(dynamic.selected_methods)}",
-            f"Dynamic recommendation: {dynamic.recommendation}",
-            f"Dynamic target price: {dynamic.target_price:,.2f}" if dynamic.target_price else "Dynamic target price: n/a",
+            f"Recommendation: {dynamic.recommendation}",
+            f"12-month target price: {dynamic.target_price:,.2f}" if dynamic.target_price else "12-month target price: n/a",
             f"Confidence: {dynamic.confidence}/100",
             f"Valuation rationale: {dynamic.valuation_rationale}",
             *[f"Assumption: {x}" for x in dynamic.key_assumptions[:5]],
             *[f"Evidence gap: {x}" for x in dynamic.evidence_gaps[:6]],
             *[f"Sanity check: {x}" for x in dynamic.sanity_checks[:6]],
         ],
-        tables=[{"name": "Dynamic valuation outputs", "rows": outputs}],
+        tables=[{"name": "Valuation workings summary", "rows": outputs}],
     )
 
 
@@ -231,7 +231,7 @@ def generate_report(request: ReportRequest) -> FullReport:
         for scenario in ["bear", "base", "bull"]
     }
 
-    peers = request.peers or DEFAULT_PEERS.get(snapshot.sector, [])
+    peers = (request.peers or DEFAULT_PEERS.get(snapshot.sector, []))[:5]
     peer_snapshots = fetch_peer_snapshot(peers) if peers else []
     company_ebitda = snapshot.ebitda
     if not company_ebitda and forecasts.get("base"):
@@ -281,15 +281,16 @@ def generate_report(request: ReportRequest) -> FullReport:
         _dynamic_valuation_section(dynamic_valuation),
         _llm_committee_section(llm_committee),
         SectionOutput(
-            title="The long view and risk/reward",
+            title="The long view and 12-month risk/reward",
             narrative=(
-                "The long-view thesis is now framed by the valuation router rather than a single generic DCF. "
-                "The baseline DCF remains visible as a cross-check, while the final recommendation is based on the selected company-specific valuation framework."
+                "The valuation is now framed as a 12-month DCF-led target price. The base-case DCF is the primary valuation anchor, "
+                "with trading comparables and sector-specific methods used as secondary triangulation. The Excel model shows the linked workings for the DCF range, comps, valuation bridge, football field and sensitivity matrix."
             ),
             bullets=[
-                f"Bear DCF cross-check: {dcfs['bear'].target_price:,.2f}" if dcfs["bear"].target_price else "Bear DCF cross-check: n/a",
-                f"Base DCF cross-check: {dcfs['base'].target_price:,.2f}" if dcfs["base"].target_price else "Base DCF cross-check: n/a",
-                f"Bull DCF cross-check: {dcfs['bull'].target_price:,.2f}" if dcfs["bull"].target_price else "Bull DCF cross-check: n/a",
+                f"Bear DCF valuation: {dcfs['bear'].target_price:,.2f}" if dcfs["bear"].target_price else "Bear DCF valuation: n/a",
+                f"Base DCF valuation: {dcfs['base'].target_price:,.2f}" if dcfs["base"].target_price else "Base DCF valuation: n/a",
+                f"Bull DCF valuation: {dcfs['bull'].target_price:,.2f}" if dcfs["bull"].target_price else "Bull DCF valuation: n/a",
+                "DCF is weighted most heavily in the final target price; comps and sector methods are shown with their workings as secondary checks.",
             ],
         ),
         company_overview_agent(snapshot),
@@ -321,6 +322,7 @@ def generate_report(request: ReportRequest) -> FullReport:
         dynamic_assumptions=dynamic_assumptions,
         financial_model_plan=financial_model_plan,
         company_evidence=company_evidence,
+        peer_comps=comps,
         dynamic_valuation=dynamic_valuation,
         llm_committee=llm_committee,
     )
