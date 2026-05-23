@@ -21,9 +21,9 @@ from src.schemas import (
     MarketSnapshot,
 )
 
-DCF_PRIMARY_WEIGHT = 0.70
-COMPS_SECONDARY_WEIGHT = 0.20
-SECTOR_TERTIARY_WEIGHT = 0.10
+DCF_PRIMARY_WEIGHT = 0.80
+COMPS_SECONDARY_WEIGHT = 0.15
+SECTOR_TERTIARY_WEIGHT = 0.05
 
 
 def _recommendation(current_price: float | None, target_price: float | None) -> tuple[str, float | None]:
@@ -46,6 +46,7 @@ def _relative_valuation(snapshot: MarketSnapshot, comps: dict[str, Any]) -> tupl
             "implied_price": implied_price,
             "median_ev_ebitda": comps.get("median_ev_ebitda"),
             "median_ev_revenue": comps.get("median_ev_revenue"),
+            "peer_count": len(comps.get("peer_table", [])),
         }, warnings
 
     current = snapshot.current_price
@@ -73,12 +74,7 @@ def _one_year_dcf_led_valuation(
     sector_price: float | None,
     sanity: list[str],
 ) -> tuple[float | None, dict[str, Any], list[str]]:
-    """Reconcile valuation into a DCF-led 12-month target price.
-
-    The DCF base case receives the largest weight. If a DCF is materially outside
-    a reasonable one-year market context, it is still preserved in the workings,
-    but the sanity check flags the issue instead of hiding the number.
-    """
+    """Reconcile valuation into a DCF-led 12-month target price."""
     warnings: list[str] = []
     current = snapshot.current_price
     bear_dcf = dcfs.get("bear").target_price if dcfs.get("bear") else None
