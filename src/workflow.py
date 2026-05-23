@@ -8,6 +8,7 @@ from src.agents.company_classifier_agent import classify_company
 from src.agents.evidence_agent import build_company_evidence_pack
 from src.agents.financial_model_planner_agent import build_financial_model_plan
 from src.agents.llm_committee import run_llm_committee_sync
+from src.agents.peer_selector_agent import select_dynamic_peer_tickers
 from src.agents.report_agents import (
     build_report_plan,
     business_model_agent,
@@ -40,14 +41,6 @@ from src.report.dcf_led_excel_exporter import export_excel_model
 from src.report.evidence_excel_overlay import apply_evidence_overlay
 from src.report.renderer import render_report
 from src.schemas import CompanyEvidencePack, DynamicValuationResult, FullReport, LLMCommitteeOutput, ReportRequest, SectionOutput
-
-DEFAULT_PEERS = {
-    "Technology": ["MSFT", "GOOGL", "META", "ORCL", "IBM"],
-    "Healthcare": ["JNJ", "PFE", "MRK", "ABBV", "BMY"],
-    "Financial Services": ["JPM", "BAC", "WFC", "MS", "C"],
-    "Consumer Cyclical": ["AMZN", "HD", "MCD", "NKE", "SBUX"],
-    "Communication Services": ["GOOGL", "META", "NFLX", "DIS", "CMCSA"],
-}
 
 
 def _recommendation(current_price: float | None, target_price: float | None) -> tuple[str, float | None]:
@@ -231,12 +224,13 @@ def generate_report(request: ReportRequest) -> FullReport:
         for scenario in ["bear", "base", "bull"]
     }
 
-    peers = (request.peers or DEFAULT_PEERS.get(snapshot.sector, []))[:5]
+    peers = select_dynamic_peer_tickers(snapshot, request.peers, min_peers=4, max_peers=5)
     peer_snapshots = fetch_peer_snapshot(peers) if peers else []
     company_ebitda = snapshot.ebitda
     if not company_ebitda and forecasts.get("base"):
         company_ebitda = forecasts["base"][0].ebitda
     comps = run_comps(peer_snapshots, company_ebitda, net_debt, shares)
+    comps["selected_peer_tickers"] = peers
 
     dynamic_valuation = run_dynamic_valuation(
         snapshot=snapshot,
@@ -284,13 +278,14 @@ def generate_report(request: ReportRequest) -> FullReport:
             title="The long view and 12-month risk/reward",
             narrative=(
                 "The valuation is now framed as a 12-month DCF-led target price. The base-case DCF is the primary valuation anchor, "
-                "with trading comparables and sector-specific methods used as secondary triangulation. The Excel model shows the linked workings for the DCF range, comps, valuation bridge, football field and sensitivity matrix."
+                "with dynamically selected trading comparables and sector-specific methods used as secondary triangulation. The Excel model shows the linked workings for the DCF range, comps, valuation bridge, football field and sensitivity matrix."
             ),
             bullets=[
                 f"Bear DCF valuation: {dcfs['bear'].target_price:,.2f}" if dcfs["bear"].target_price else "Bear DCF valuation: n/a",
                 f"Base DCF valuation: {dcfs['base'].target_price:,.2f}" if dcfs["base"].target_price else "Base DCF valuation: n/a",
                 f"Bull DCF valuation: {dcfs['bull'].target_price:,.2f}" if dcfs["bull"].target_price else "Bull DCF valuation: n/a",
-                "DCF is weighted most heavily in the final target price; comps and sector methods are shown with their workings as secondary checks.",
+                "DCF carries an 80% weighting in the final target price; dynamic peer comps and sector methods are secondary checks.",
+                f"Dynamic peer set: {', '.join(peers) if peers else 'n/a'}",
             ],
         ),
         company_overview_agent(snapshot),
