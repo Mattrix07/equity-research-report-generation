@@ -1,50 +1,27 @@
 # Equity Research Report Generation
 
-A localhost prototype for generating structured equity research reports and linked Excel valuation models using a multi-agent workflow, dynamic valuation routing and deterministic model engines.
-
-The project is designed around initiation/update-report structures: investment snapshot, executive summary, long-view thesis, scenario framework, company overview, business model, market analysis, competitive landscape, commercial drivers, foundational model plan, dynamic valuation, DCF cross-check, sensitivity analysis, catalysts, risks and appendices.
+A localhost prototype for generating structured equity research reports and simplified Excel valuation models using a multi-agent workflow, dynamic peer selection, DCF-led valuation and optional native Excel recalculation.
 
 ## What this prototype does
 
 - Runs a FastAPI localhost app.
 - Generates a structured initiation, update, quick-view or valuation-only report.
 - Pulls public market and financial data with `yfinance`.
-- Classifies the company and selects a valuation framework instead of forcing every company through one generic DCF.
-- Builds a foundational financial model plan with forecast drivers, required evidence, valuation stack and sensitivity cases.
-- Produces an Excel model output with tabs for:
-  - Output
-  - Source Data
+- Uses a multi-agent LLM committee when enabled.
+- Selects peers dynamically rather than relying on a fixed sector peer list.
+- Produces a simplified seven-tab Excel model:
   - Assumptions
-  - Forecast
+  - 3 Statement Model
   - WACC
   - DCF
-  - Comps
-  - Sensitivity
+  - Comps Analysis
   - Football Field
-  - Sector-specific tabs such as Pipeline rNPV, Mining NAV, SaaS Unit Economics or ROE / Book Value Model when applicable
-- Runs deterministic Python calculations for:
-  - historical ratios
-  - technical indicators
-  - forecast scenarios
-  - baseline DCF cross-check
-  - WACC / terminal growth sensitivity
-  - revenue growth / EBITDA margin sensitivity
-  - simplified peer comps
-- Uses agent-style modules for:
-  - report management
-  - company classification
-  - assumption derivation
-  - financial model planning
-  - dynamic valuation routing
-  - company overview
-  - market analysis
-  - competitive landscape
-  - commercial drivers
-  - risk review
-  - QA
-- Produces a browser-viewable HTML report and a downloadable Excel workbook on localhost.
+  - Sensitivity Analysis
+- Uses a fixed template-controlled Excel export path rather than allowing the LLM to invent workbook formulas.
+- Validates key workbook links before returning the file.
+- Optionally recalculates the workbook through native Microsoft Excel using `xlwings` when `ENABLE_EXCEL_RUNTIME=true`.
 
-The first version is intentionally practical rather than perfect. It uses deterministic fallbacks when an LLM API key is not configured, so the app can still run locally.
+The Excel workbook is intentionally simple. The LLMs are used for research, assumptions, narrative, risks and investment committee synthesis. Excel remains the calculation layer.
 
 ## Repository structure
 
@@ -58,9 +35,13 @@ equity-research-report-generation/
 │   ├── agents/
 │   ├── data/
 │   ├── engines/
+│   ├── excel/
+│   │   ├── excel_runtime.py
+│   │   └── validate_workbook.py
 │   ├── report/
-│   │   ├── excel_exporter.py
-│   │   └── templates/
+│   │   ├── simplified_excel_exporter.py
+│   │   ├── repaired_simplified_excel_exporter.py
+│   │   └── renderer.py
 │   └── ui/
 ├── outputs/
 │   ├── reports/
@@ -94,17 +75,70 @@ Open:
 http://localhost:8080
 ```
 
-Generate a report from the UI. The response will include:
-
-- an HTML report link
-- an Excel model download link
-
 Generated files are saved under:
 
 ```text
 outputs/reports/
 outputs/models/
 ```
+
+## Excel model approach
+
+The Excel model now follows a controlled template approach:
+
+```text
+Python / agents collect data and assumptions
+        ↓
+Fixed seven-tab Excel model is generated
+        ↓
+Workbook formulas are patched only from a known cell map
+        ↓
+Workbook structure is validated
+        ↓
+Optional native Excel recalculation via xlwings
+        ↓
+Workbook is returned to the UI
+```
+
+This avoids the earlier issue where generated formulas became too complex, circular or inconsistent.
+
+The scenario selector is in:
+
+```text
+Assumptions!B3
+```
+
+Valid values:
+
+```text
+Bear
+Base
+Bull
+```
+
+The selected scenario flows into the 3 Statement Model, WACC, DCF, Football Field and Sensitivity Analysis tabs.
+
+## Optional native Excel recalculation
+
+By default, the app creates a workbook that recalculates when opened in Excel:
+
+```env
+ENABLE_EXCEL_RUNTIME=false
+```
+
+If you are running locally on a machine with Microsoft Excel installed, you can ask the app to open Excel in the background, recalculate the workbook, save it and return the recalculated file:
+
+```env
+ENABLE_EXCEL_RUNTIME=true
+```
+
+This requires:
+
+```bash
+pip install xlwings
+```
+
+`xlwings` is included in `requirements.txt`, but native recalculation still requires Microsoft Excel to be installed on your machine. Keep this disabled on headless servers.
 
 ## Example API request
 
@@ -119,7 +153,7 @@ The JSON response includes:
 ```json
 {
   "report_url": "/outputs/reports/aapl_initiation_report.html",
-  "excel_model_url": "/outputs/models/aapl_initiation_model.xlsx"
+  "excel_model_url": "/outputs/models/aapl_initiation_simplified_model.xlsx"
 }
 ```
 
@@ -151,24 +185,10 @@ LLM_VALUATION_MODEL=gpt-4o-mini
 LLM_REPORT_WRITER_MODEL=gpt-4o-mini
 ```
 
-For Nebius Token Factory, use the OpenAI-compatible endpoint and model ID provided by Nebius.
-
 ## Current limitations
 
 - This is not investment advice.
 - Financial data comes from public `yfinance` fields and may be incomplete for some stocks.
-- Forecasting uses structured assumptions and deterministic calculations, but assumptions still require analyst review.
-- The Excel model is an analyst-style scaffold, not yet a fully audited institutional model.
-- Sector-specific tabs are generated as structured templates first; detailed asset-level models require deeper source data.
-- The peer comps module uses a simple default peer set unless extended.
-
-## Intended next upgrades
-
-- Real Excel export of full three-statement balance sheet and cash flow linkages.
-- SEC/ASX filings ingestion.
-- Broker consensus ingestion.
-- More sector-specific forecast templates.
-- Healthcare-specific risk-adjusted NPV engine populated from pipeline data.
-- Mining NAV engine populated from reserves, mine plans and commodity decks.
-- Human-in-the-loop assumption editing.
-- PDF export.
+- The workbook is simplified and should be reviewed by a human analyst.
+- Native Excel recalculation only works locally where Microsoft Excel is installed.
+- The app validates workbook structure and references, but it cannot fully audit accounting judgement or forecast assumptions.
