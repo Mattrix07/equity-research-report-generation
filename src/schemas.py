@@ -294,6 +294,7 @@ class FullReport(BaseModel):
     dynamic_assumptions: DynamicAssumptions | None = None
     financial_model_plan: FinancialModelPlan | None = None
     company_evidence: CompanyEvidencePack | None = None
+    peer_comps: dict[str, Any] = Field(default_factory=dict)
     dynamic_valuation: DynamicValuationResult | None = None
     llm_committee: LLMCommitteeOutput | None = None
     html_path: str | None = None
