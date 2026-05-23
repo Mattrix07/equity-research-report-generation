@@ -1,7 +1,15 @@
-"""Chart generation engine."""
+"""Chart generation engine.
+
+Matplotlib is forced to use the non-interactive Agg backend so charts can be
+created safely inside FastAPI worker threads on macOS, Linux and hosted servers.
+"""
 from __future__ import annotations
 
 from pathlib import Path
+
+import matplotlib
+
+matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
 import pandas as pd
