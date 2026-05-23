@@ -37,8 +37,7 @@ from src.engines.dynamic_valuation_engine import run_dynamic_valuation
 from src.engines.forecast_engine import build_default_assumptions, run_forecast
 from src.engines.sensitivity_engine import growth_margin_sensitivity, wacc_terminal_growth_sensitivity
 from src.engines.technical_engine import run_technical_analysis
-from src.report.dcf_led_excel_exporter import export_excel_model
-from src.report.evidence_excel_overlay import apply_evidence_overlay
+from src.report.simplified_excel_exporter import export_excel_model
 from src.report.renderer import render_report
 from src.schemas import CompanyEvidencePack, DynamicValuationResult, FullReport, LLMCommitteeOutput, ReportRequest, SectionOutput
 
@@ -143,12 +142,15 @@ def _financial_model_plan_section(model_plan) -> SectionOutput:
     ]
     return SectionOutput(
         title="Foundational financial model plan",
-        narrative=model_plan.model_principle,
+        narrative=(
+            "The Excel model has been simplified to seven core sheets: Assumptions, 3 Statement Model, WACC, DCF, Comps Analysis, Football Field and Sensitivity Analysis. "
+            "The selected scenario in the Assumptions sheet drives the forecast model and valuation outputs."
+        ),
         bullets=[
             f"Model type: {model_plan.model_type}",
-            f"Valuation stack: {', '.join(model_plan.valuation_stack)}",
-            f"Sensitivity cases: {', '.join(model_plan.sensitivity_cases)}",
-            *[f"Build warning: {warning}" for warning in model_plan.build_warnings[:5]],
+            "Excel scope: simplified seven-tab model",
+            "Scenario selector: Bear / Base / Bull in the Assumptions tab",
+            "Forecast horizon: five historical years and up to eight forecast years",
         ],
         tables=[
             {"name": "Recommended workbook architecture", "rows": tab_rows},
@@ -162,8 +164,8 @@ def _company_evidence_section(evidence: CompanyEvidencePack) -> SectionOutput:
     return SectionOutput(
         title="Company-specific source evidence",
         narrative=(
-            "This section shows the source evidence available to populate the Excel model and sector-specific tabs. "
-            "LLM enrichment is used only when enabled; otherwise the model uses deterministic evidence from market data and flags gaps."
+            "This section shows the source evidence available to support the model assumptions. "
+            "The Excel model itself has been kept deliberately simple and does not add separate evidence or sector-engine tabs."
         ),
         bullets=[
             f"Evidence items collected: {len(evidence.evidence_items)}",
@@ -277,14 +279,14 @@ def generate_report(request: ReportRequest) -> FullReport:
         SectionOutput(
             title="The long view and 12-month risk/reward",
             narrative=(
-                "The valuation is now framed as a 12-month DCF-led target price. The base-case DCF is the primary valuation anchor, "
-                "with dynamically selected trading comparables and sector-specific methods used as secondary triangulation. The Excel model shows the linked workings for the DCF range, comps, valuation bridge, football field and sensitivity matrix."
+                "The valuation is framed as a 12-month DCF-led target price. The simplified Excel model now focuses only on the core forecast, WACC, DCF, comps, football field and sensitivity analysis. "
+                "The Assumptions tab contains a Bear/Base/Bull selector that flows through the model."
             ),
             bullets=[
                 f"Bear DCF valuation: {dcfs['bear'].target_price:,.2f}" if dcfs["bear"].target_price else "Bear DCF valuation: n/a",
                 f"Base DCF valuation: {dcfs['base'].target_price:,.2f}" if dcfs["base"].target_price else "Base DCF valuation: n/a",
                 f"Bull DCF valuation: {dcfs['bull'].target_price:,.2f}" if dcfs["bull"].target_price else "Bull DCF valuation: n/a",
-                "DCF carries an 80% weighting in the final target price; dynamic peer comps and sector methods are secondary checks.",
+                "DCF carries an 80% weighting in the final target price; dynamic peer comps and other valuation references are secondary checks.",
                 f"Dynamic peer set: {', '.join(peers) if peers else 'n/a'}",
             ],
         ),
@@ -335,5 +337,4 @@ def generate_report(request: ReportRequest) -> FullReport:
     html_path = render_report(report, report_dir, chart_paths=chart_paths)
     report.html_path = html_path
     report.excel_model_path = export_excel_model(report, model_dir)
-    report.excel_model_path = apply_evidence_overlay(report, report.excel_model_path)
     return report
