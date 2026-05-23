@@ -6,6 +6,19 @@ from pydantic import BaseModel, Field
 
 ReportType = Literal["quick", "update", "initiation", "valuation_only", "healthcare_initiation"]
 ScenarioName = Literal["bear", "base", "bull"]
+ValuationMethod = Literal[
+    "mature_operating_dcf",
+    "sotp",
+    "bank_insurer_roe_pbv",
+    "mining_nav",
+    "biotech_rnpv",
+    "royalty_healthcare_sotp",
+    "saas_unit_economics",
+    "asset_heavy_industrial",
+    "relative_valuation",
+    "insufficient_data_review",
+]
+TerminalValueMethod = Literal["perpetuity_growth", "exit_multiple", "finite_life", "asset_level_rnpv", "not_applicable"]
 
 
 class ReportRequest(BaseModel):
@@ -46,6 +59,10 @@ class MarketSnapshot(BaseModel):
     total_cash: float | None = None
     total_debt: float | None = None
     net_debt: float | None = None
+    book_value: float | None = None
+    price_to_book: float | None = None
+    return_on_equity: float | None = None
+    profit_margins: float | None = None
     fifty_two_week_high: float | None = None
     fifty_two_week_low: float | None = None
     business_summary: str = ""
@@ -128,6 +145,50 @@ class SectionOutput(BaseModel):
     tables: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class CompanyClassification(BaseModel):
+    primary_type: str
+    sector: str
+    industry: str
+    valuation_methods: list[ValuationMethod]
+    terminal_value_method: TerminalValueMethod
+    rationale: str
+    evidence: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class DynamicAssumptions(BaseModel):
+    wacc: float | None = None
+    cost_of_equity: float | None = None
+    after_tax_cost_of_debt: float | None = None
+    tax_rate: float | None = None
+    terminal_growth: float | None = None
+    terminal_value_method: TerminalValueMethod = "not_applicable"
+    exit_multiple: float | None = None
+    revenue_growth_logic: str = ""
+    margin_logic: str = ""
+    capital_intensity_logic: str = ""
+    risk_adjustment_logic: str = ""
+    sources_and_evidence: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class DynamicValuationResult(BaseModel):
+    selected_methods: list[ValuationMethod]
+    primary_method: ValuationMethod
+    recommendation: str = "REVIEW"
+    target_price: float | None = None
+    upside_downside: float | None = None
+    confidence: int = 50
+    method_weighting: dict[str, float] = Field(default_factory=dict)
+    valuation_outputs: dict[str, Any] = Field(default_factory=dict)
+    investment_thesis: str = ""
+    valuation_rationale: str = ""
+    key_assumptions: list[str] = Field(default_factory=list)
+    key_risks: list[str] = Field(default_factory=list)
+    evidence_gaps: list[str] = Field(default_factory=list)
+    sanity_checks: list[str] = Field(default_factory=list)
+
+
 class LLMOpinion(BaseModel):
     agent_name: str
     model: str
@@ -171,5 +232,8 @@ class FullReport(BaseModel):
     recommendation: str
     target_price: float | None
     upside_downside: float | None
+    company_classification: CompanyClassification | None = None
+    dynamic_assumptions: DynamicAssumptions | None = None
+    dynamic_valuation: DynamicValuationResult | None = None
     llm_committee: LLMCommitteeOutput | None = None
     html_path: str | None = None
