@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from src.agents.assumption_derivation_agent import assumptions_to_scenario_assumptions, derive_dynamic_assumptions
+from src.agents.company_classifier_agent import classify_company
 from src.agents.llm_committee import run_llm_committee_sync
 from src.agents.report_agents import (
     build_report_plan,
@@ -28,11 +30,12 @@ from src.data.yfinance_client import (
 from src.engines.chart_engine import chart_forecast_revenue, chart_margin_forecast, chart_price_technicals
 from src.engines.comps_engine import run_comps
 from src.engines.dcf_engine import run_dcf
+from src.engines.dynamic_valuation_engine import run_dynamic_valuation
 from src.engines.forecast_engine import build_default_assumptions, run_forecast
 from src.engines.sensitivity_engine import growth_margin_sensitivity, wacc_terminal_growth_sensitivity
 from src.engines.technical_engine import run_technical_analysis
 from src.report.renderer import render_report
-from src.schemas import FullReport, LLMCommitteeOutput, ReportRequest, SectionOutput
+from src.schemas import DynamicValuationResult, FullReport, LLMCommitteeOutput, ReportRequest, SectionOutput
 
 DEFAULT_PEERS = {
     "Technology": ["MSFT", "GOOGL", "META", "ORCL"],
@@ -98,6 +101,30 @@ def _llm_committee_section(llm_committee: LLMCommitteeOutput) -> SectionOutput:
     )
 
 
+def _dynamic_valuation_section(dynamic: DynamicValuationResult) -> SectionOutput:
+    outputs = []
+    for method, output in dynamic.valuation_outputs.items():
+        if isinstance(output, dict):
+            outputs.append({"method": method, "output": str(output)[:1200]})
+
+    return SectionOutput(
+        title="Dynamic valuation router and committee output",
+        narrative=dynamic.investment_thesis,
+        bullets=[
+            f"Primary valuation method: {dynamic.primary_method}",
+            f"Selected methods: {', '.join(dynamic.selected_methods)}",
+            f"Dynamic recommendation: {dynamic.recommendation}",
+            f"Dynamic target price: {dynamic.target_price:,.2f}" if dynamic.target_price else "Dynamic target price: n/a",
+            f"Confidence: {dynamic.confidence}/100",
+            f"Valuation rationale: {dynamic.valuation_rationale}",
+            *[f"Assumption: {x}" for x in dynamic.key_assumptions[:5]],
+            *[f"Evidence gap: {x}" for x in dynamic.evidence_gaps[:6]],
+            *[f"Sanity check: {x}" for x in dynamic.sanity_checks[:6]],
+        ],
+        tables=[{"name": "Dynamic valuation outputs", "rows": outputs}],
+    )
+
+
 def generate_report(request: ReportRequest) -> FullReport:
     snapshot = fetch_market_snapshot(request.ticker, request.company_name)
     if request.current_price:
@@ -116,7 +143,19 @@ def generate_report(request: ReportRequest) -> FullReport:
     price_history = fetch_price_history(snapshot.ticker)
     technicals = run_technical_analysis(price_history)
 
+    company_classification = classify_company(snapshot, historicals)
+    dynamic_assumptions = derive_dynamic_assumptions(snapshot, historicals, company_classification)
+
     assumptions = build_default_assumptions(historicals)
+    assumptions["base"] = assumptions_to_scenario_assumptions(assumptions["base"], dynamic_assumptions)
+    assumptions["bear"].wacc = assumptions["base"].wacc + 0.01
+    assumptions["bull"].wacc = max(assumptions["base"].wacc - 0.005, 0.06)
+    assumptions["bear"].tax_rate = assumptions["base"].tax_rate
+    assumptions["bull"].tax_rate = assumptions["base"].tax_rate
+    if dynamic_assumptions.terminal_growth is not None:
+        assumptions["bear"].terminal_growth = max(dynamic_assumptions.terminal_growth - 0.005, 0.0)
+        assumptions["bull"].terminal_growth = dynamic_assumptions.terminal_growth + 0.005
+
     forecasts = {scenario: run_forecast(historicals, assumption) for scenario, assumption in assumptions.items()}
 
     net_debt = snapshot.net_debt or 0.0
@@ -126,15 +165,26 @@ def generate_report(request: ReportRequest) -> FullReport:
         for scenario in ["bear", "base", "bull"]
     }
 
-    target_price = dcfs["base"].target_price
-    recommendation, upside = _recommendation(snapshot.current_price, target_price)
-
     peers = request.peers or DEFAULT_PEERS.get(snapshot.sector, [])
     peer_snapshots = fetch_peer_snapshot(peers) if peers else []
     company_ebitda = snapshot.ebitda
     if not company_ebitda and forecasts.get("base"):
         company_ebitda = forecasts["base"][0].ebitda
     comps = run_comps(peer_snapshots, company_ebitda, net_debt, shares)
+
+    dynamic_valuation = run_dynamic_valuation(
+        snapshot=snapshot,
+        historicals=historicals,
+        forecasts=forecasts,
+        dcfs=dcfs,
+        comps=comps,
+        classification=company_classification,
+        dynamic_assumptions=dynamic_assumptions,
+    )
+
+    target_price = dynamic_valuation.target_price
+    recommendation = dynamic_valuation.recommendation
+    upside = dynamic_valuation.upside_downside
 
     llm_committee = run_llm_committee_sync(snapshot, forecasts, dcfs, technicals, comps)
     if llm_committee.enabled and llm_committee.final_recommendation:
@@ -151,18 +201,18 @@ def generate_report(request: ReportRequest) -> FullReport:
     sections: list[SectionOutput] = [
         front_page_agent(snapshot, recommendation, target_price, upside),
         executive_summary_agent(snapshot, dcfs["base"], recommendation),
+        _dynamic_valuation_section(dynamic_valuation),
         _llm_committee_section(llm_committee),
         SectionOutput(
             title="The long view and risk/reward",
             narrative=(
-                "The long-view thesis is framed through bear, base and bull cases. The base case reflects the most balanced "
-                "view of revenue growth, operating leverage and cash conversion. The bull case assumes stronger growth and margin "
-                "expansion, while the bear case captures slower adoption, weaker margins and a higher discount rate."
+                "The long-view thesis is now framed by the valuation router rather than a single generic DCF. "
+                "The baseline DCF remains visible as a cross-check, while the final recommendation is based on the selected company-specific valuation framework."
             ),
             bullets=[
-                f"Bear target price: {dcfs['bear'].target_price:,.2f}" if dcfs["bear"].target_price else "Bear target price: n/a",
-                f"Base target price: {dcfs['base'].target_price:,.2f}" if dcfs["base"].target_price else "Base target price: n/a",
-                f"Bull target price: {dcfs['bull'].target_price:,.2f}" if dcfs["bull"].target_price else "Bull target price: n/a",
+                f"Bear DCF cross-check: {dcfs['bear'].target_price:,.2f}" if dcfs["bear"].target_price else "Bear DCF cross-check: n/a",
+                f"Base DCF cross-check: {dcfs['base'].target_price:,.2f}" if dcfs["base"].target_price else "Base DCF cross-check: n/a",
+                f"Bull DCF cross-check: {dcfs['bull'].target_price:,.2f}" if dcfs["bull"].target_price else "Bull DCF cross-check: n/a",
             ],
         ),
         company_overview_agent(snapshot),
@@ -190,6 +240,9 @@ def generate_report(request: ReportRequest) -> FullReport:
         recommendation=recommendation,
         target_price=target_price,
         upside_downside=upside,
+        company_classification=company_classification,
+        dynamic_assumptions=dynamic_assumptions,
+        dynamic_valuation=dynamic_valuation,
         llm_committee=llm_committee,
     )
 
