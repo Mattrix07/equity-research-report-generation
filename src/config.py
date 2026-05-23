@@ -43,6 +43,7 @@ class Settings:
     llm_valuation_model: str = _model_env("LLM_VALUATION_MODEL", OPENAI_MODEL_DEFAULT)
     llm_report_writer_model: str = _model_env("LLM_REPORT_WRITER_MODEL", OPENAI_MODEL_DEFAULT)
     llm_qa_model: str = _model_env("LLM_QA_MODEL", OPENAI_MODEL_DEFAULT)
+    enable_excel_runtime: bool = _bool_env("ENABLE_EXCEL_RUNTIME", False)
     default_wacc: float = _float_env("DEFAULT_WACC", 0.095)
     default_terminal_growth: float = _float_env("DEFAULT_TERMINAL_GROWTH", 0.025)
     default_tax_rate: float = _float_env("DEFAULT_TAX_RATE", 0.25)
