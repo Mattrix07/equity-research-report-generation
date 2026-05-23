@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from src.agents.llm_committee import run_llm_committee_sync
 from src.agents.report_agents import (
     build_report_plan,
     business_model_agent,
@@ -31,7 +32,7 @@ from src.engines.forecast_engine import build_default_assumptions, run_forecast
 from src.engines.sensitivity_engine import growth_margin_sensitivity, wacc_terminal_growth_sensitivity
 from src.engines.technical_engine import run_technical_analysis
 from src.report.renderer import render_report
-from src.schemas import FullReport, ReportRequest, SectionOutput
+from src.schemas import FullReport, LLMCommitteeOutput, ReportRequest, SectionOutput
 
 DEFAULT_PEERS = {
     "Technology": ["MSFT", "GOOGL", "META", "ORCL"],
@@ -51,6 +52,50 @@ def _recommendation(current_price: float | None, target_price: float | None) -> 
     if upside <= -0.10:
         return "SELL", upside
     return "HOLD", upside
+
+
+def _llm_committee_section(llm_committee: LLMCommitteeOutput) -> SectionOutput:
+    if not llm_committee.enabled:
+        return SectionOutput(
+            title="LLM investment committee",
+            narrative=(
+                "The LLM committee is disabled. Set ENABLE_LLM_COMMITTEE=true and provide an OpenAI-compatible API key "
+                "to activate parallel bull, bear and valuation agents plus a sequential committee-chair synthesis."
+            ),
+        )
+
+    opinion_rows = []
+    for op in llm_committee.opinions:
+        opinion_rows.append({
+            "agent": op.agent_name,
+            "model": op.model,
+            "recommendation": op.recommendation,
+            "confidence": op.confidence,
+            "target_price": op.target_price,
+            "implied_upside": op.implied_upside,
+            "error": op.error,
+        })
+
+    bullets = []
+    if llm_committee.final_recommendation:
+        bullets.append(f"Committee recommendation: {llm_committee.final_recommendation}")
+    if llm_committee.final_target_price:
+        bullets.append(f"Committee target price: {llm_committee.final_target_price:,.2f}")
+    if llm_committee.final_confidence is not None:
+        bullets.append(f"Committee confidence: {llm_committee.final_confidence}/100")
+    bullets.extend([f"Risk: {risk}" for risk in llm_committee.final_risks[:5]])
+    bullets.extend([f"Evidence gap: {gap}" for gap in llm_committee.final_evidence_gaps[:5]])
+    if llm_committee.synthesis_error:
+        bullets.append(f"Committee synthesis error: {llm_committee.synthesis_error}")
+
+    return SectionOutput(
+        title="LLM investment committee",
+        narrative=llm_committee.final_thesis or (
+            "The LLM committee generated individual agent views, but no final synthesis was produced. Review the agent table below."
+        ),
+        bullets=bullets,
+        tables=[{"name": "LLM agent opinions", "rows": opinion_rows}],
+    )
 
 
 def generate_report(request: ReportRequest) -> FullReport:
@@ -91,6 +136,13 @@ def generate_report(request: ReportRequest) -> FullReport:
         company_ebitda = forecasts["base"][0].ebitda
     comps = run_comps(peer_snapshots, company_ebitda, net_debt, shares)
 
+    llm_committee = run_llm_committee_sync(snapshot, forecasts, dcfs, technicals, comps)
+    if llm_committee.enabled and llm_committee.final_recommendation:
+        recommendation = llm_committee.final_recommendation
+        if llm_committee.final_target_price:
+            target_price = llm_committee.final_target_price
+            _, upside = _recommendation(snapshot.current_price, target_price)
+
     sensitivities = [
         wacc_terminal_growth_sensitivity(forecasts["base"], assumptions["base"], net_debt, shares),
         growth_margin_sensitivity(historicals, assumptions["base"], net_debt, shares),
@@ -99,6 +151,7 @@ def generate_report(request: ReportRequest) -> FullReport:
     sections: list[SectionOutput] = [
         front_page_agent(snapshot, recommendation, target_price, upside),
         executive_summary_agent(snapshot, dcfs["base"], recommendation),
+        _llm_committee_section(llm_committee),
         SectionOutput(
             title="The long view and risk/reward",
             narrative=(
@@ -137,6 +190,7 @@ def generate_report(request: ReportRequest) -> FullReport:
         recommendation=recommendation,
         target_price=target_price,
         upside_downside=upside,
+        llm_committee=llm_committee,
     )
 
     output_root = Path("outputs")
