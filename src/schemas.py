@@ -264,3 +264,4 @@ class FullReport(BaseModel):
     dynamic_valuation: DynamicValuationResult | None = None
     llm_committee: LLMCommitteeOutput | None = None
     html_path: str | None = None
+    excel_model_path: str | None = None
