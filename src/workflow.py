@@ -186,7 +186,16 @@ def generate_report(request: ReportRequest) -> FullReport:
     recommendation = dynamic_valuation.recommendation
     upside = dynamic_valuation.upside_downside
 
-    llm_committee = run_llm_committee_sync(snapshot, forecasts, dcfs, technicals, comps)
+    llm_committee = run_llm_committee_sync(
+        snapshot,
+        forecasts,
+        dcfs,
+        technicals,
+        comps,
+        company_classification,
+        dynamic_assumptions,
+        dynamic_valuation,
+    )
     if llm_committee.enabled and llm_committee.final_recommendation:
         recommendation = llm_committee.final_recommendation
         if llm_committee.final_target_price:
