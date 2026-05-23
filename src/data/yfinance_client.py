@@ -5,7 +5,6 @@ reviewed before investment use.
 """
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any
 
 import pandas as pd
@@ -58,6 +57,10 @@ def fetch_market_snapshot(ticker: str, company_name: str | None = None) -> Marke
         total_cash=total_cash,
         total_debt=total_debt,
         net_debt=net_debt,
+        book_value=_safe_float(info.get("bookValue")),
+        price_to_book=_safe_float(info.get("priceToBook")),
+        return_on_equity=_safe_float(info.get("returnOnEquity")),
+        profit_margins=_safe_float(info.get("profitMargins")),
         fifty_two_week_high=_safe_float(info.get("fiftyTwoWeekHigh")),
         fifty_two_week_low=_safe_float(info.get("fiftyTwoWeekLow")),
         business_summary=info.get("longBusinessSummary") or "",
