@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# Generated outputs
+outputs/reports/*.html
+outputs/charts/*.png
+outputs/models/*.xlsx
+outputs/models/*.csv
+
+# macOS / editor
+.DS_Store
+.vscode/
+.idea/
