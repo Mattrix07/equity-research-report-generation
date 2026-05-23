@@ -5,6 +5,7 @@ from pathlib import Path
 
 from src.agents.assumption_derivation_agent import assumptions_to_scenario_assumptions, derive_dynamic_assumptions
 from src.agents.company_classifier_agent import classify_company
+from src.agents.financial_model_planner_agent import build_financial_model_plan
 from src.agents.llm_committee import run_llm_committee_sync
 from src.agents.report_agents import (
     build_report_plan,
@@ -125,6 +126,41 @@ def _dynamic_valuation_section(dynamic: DynamicValuationResult) -> SectionOutput
     )
 
 
+def _financial_model_plan_section(model_plan) -> SectionOutput:
+    tab_rows = [
+        {
+            "tab": tab.tab_name,
+            "purpose": tab.purpose,
+            "key_inputs": "; ".join(tab.key_inputs[:4]),
+            "key_outputs": "; ".join(tab.key_outputs[:4]),
+        }
+        for tab in model_plan.workbook_tabs
+    ]
+    driver_rows = [
+        {
+            "driver": driver.driver_name,
+            "logic": driver.formula_or_logic,
+            "evidence_required": "; ".join(driver.evidence_required[:5]),
+            "status": driver.current_status,
+        }
+        for driver in model_plan.forecast_drivers
+    ]
+    return SectionOutput(
+        title="Foundational financial model plan",
+        narrative=model_plan.model_principle,
+        bullets=[
+            f"Model type: {model_plan.model_type}",
+            f"Valuation stack: {', '.join(model_plan.valuation_stack)}",
+            f"Sensitivity cases: {', '.join(model_plan.sensitivity_cases)}",
+            *[f"Build warning: {warning}" for warning in model_plan.build_warnings[:5]],
+        ],
+        tables=[
+            {"name": "Recommended workbook architecture", "rows": tab_rows},
+            {"name": "Forecast driver audit trail", "rows": driver_rows},
+        ],
+    )
+
+
 def generate_report(request: ReportRequest) -> FullReport:
     snapshot = fetch_market_snapshot(request.ticker, request.company_name)
     if request.current_price:
@@ -145,6 +181,7 @@ def generate_report(request: ReportRequest) -> FullReport:
 
     company_classification = classify_company(snapshot, historicals)
     dynamic_assumptions = derive_dynamic_assumptions(snapshot, historicals, company_classification)
+    financial_model_plan = build_financial_model_plan(snapshot, historicals, company_classification, dynamic_assumptions)
 
     assumptions = build_default_assumptions(historicals)
     assumptions["base"] = assumptions_to_scenario_assumptions(assumptions["base"], dynamic_assumptions)
@@ -210,6 +247,7 @@ def generate_report(request: ReportRequest) -> FullReport:
     sections: list[SectionOutput] = [
         front_page_agent(snapshot, recommendation, target_price, upside),
         executive_summary_agent(snapshot, dcfs["base"], recommendation),
+        _financial_model_plan_section(financial_model_plan),
         _dynamic_valuation_section(dynamic_valuation),
         _llm_committee_section(llm_committee),
         SectionOutput(
@@ -251,6 +289,7 @@ def generate_report(request: ReportRequest) -> FullReport:
         upside_downside=upside,
         company_classification=company_classification,
         dynamic_assumptions=dynamic_assumptions,
+        financial_model_plan=financial_model_plan,
         dynamic_valuation=dynamic_valuation,
         llm_committee=llm_committee,
     )
