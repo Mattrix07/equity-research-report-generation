@@ -1,8 +1,8 @@
 """Optional multi-LLM investment committee.
 
 This layer lets LLM agents form independent views from the same evidence pack
-that feeds the deterministic Python valuation engines. The deterministic model
-remains the numerical anchor; the LLM committee adds judgement, challenge,
+that feeds the deterministic Python valuation engines. The deterministic models
+remain calculation engines; the LLM committee adds judgement, challenge,
 interpretation and a reconciled recommendation.
 """
 from __future__ import annotations
@@ -12,10 +12,19 @@ import json
 from typing import Any
 
 from openai import AsyncOpenAI
-from pydantic import ValidationError
 
 from src.config import settings
-from src.schemas import DCFOutput, ForecastRow, LLMCommitteeOutput, LLMOpinion, MarketSnapshot, TechnicalSnapshot
+from src.schemas import (
+    CompanyClassification,
+    DCFOutput,
+    DynamicAssumptions,
+    DynamicValuationResult,
+    ForecastRow,
+    LLMCommitteeOutput,
+    LLMOpinion,
+    MarketSnapshot,
+    TechnicalSnapshot,
+)
 
 
 def llm_enabled() -> bool:
@@ -38,23 +47,30 @@ def _evidence_pack(
     dcfs: dict[str, DCFOutput],
     technicals: TechnicalSnapshot,
     comps: dict[str, Any],
+    classification: CompanyClassification | None = None,
+    dynamic_assumptions: DynamicAssumptions | None = None,
+    dynamic_valuation: DynamicValuationResult | None = None,
 ) -> dict[str, Any]:
     return {
         "company": snapshot.model_dump(),
+        "company_classification": classification.model_dump() if classification else None,
+        "dynamic_assumptions": dynamic_assumptions.model_dump() if dynamic_assumptions else None,
+        "dynamic_valuation_router_output": dynamic_valuation.model_dump() if dynamic_valuation else None,
         "forecast_summary": {
             scenario: [row.model_dump() for row in rows] for scenario, rows in forecasts.items()
         },
-        "dcf_outputs": {scenario: dcf.model_dump() for scenario, dcf in dcfs.items()},
+        "baseline_dcf_cross_check": {scenario: dcf.model_dump() for scenario, dcf in dcfs.items()},
         "technical_analysis": technicals.model_dump(),
         "peer_comps": comps,
         "instruction": (
-            "Use only this evidence pack. Do not invent missing facts. If evidence is missing, say so. "
-            "You may form an independent valuation view, but distinguish it from the Python DCF output."
+            "Use only this evidence pack. Do not invent missing facts. Treat the baseline DCF as a cross-check, "
+            "not as the automatic final valuation. Assess whether the selected valuation method is appropriate for the company. "
+            "If critical evidence is missing, say so clearly."
         ),
     }
 
 
-def _json_prompt(data: dict[str, Any], max_chars: int = 45000) -> str:
+def _json_prompt(data: dict[str, Any], max_chars: int = 55000) -> str:
     text = json.dumps(data, default=str, indent=2)
     return text[:max_chars]
 
@@ -126,12 +142,15 @@ async def run_llm_committee(
     dcfs: dict[str, DCFOutput],
     technicals: TechnicalSnapshot,
     comps: dict[str, Any],
+    classification: CompanyClassification | None = None,
+    dynamic_assumptions: DynamicAssumptions | None = None,
+    dynamic_valuation: DynamicValuationResult | None = None,
 ) -> LLMCommitteeOutput:
     if not llm_enabled():
         return LLMCommitteeOutput(enabled=False)
 
     client = AsyncOpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url)
-    evidence = _evidence_pack(snapshot, forecasts, dcfs, technicals, comps)
+    evidence = _evidence_pack(snapshot, forecasts, dcfs, technicals, comps, classification, dynamic_assumptions, dynamic_valuation)
 
     agent_specs = [
         (
@@ -144,13 +163,13 @@ async def run_llm_committee(
             "Bear Analyst",
             settings.llm_bear_model,
             "Contrarian risk analyst",
-            "You are a sceptical equity research analyst. Challenge the thesis, stress test assumptions, identify valuation downside and highlight missing evidence. Stay grounded in the evidence pack.",
+            "You are a sceptical equity research analyst. Challenge the selected valuation method, stress test assumptions, identify valuation downside and highlight missing evidence. Stay grounded in the evidence pack.",
         ),
         (
             "Valuation Analyst",
             settings.llm_valuation_model,
             "Independent valuation analyst",
-            "You are a valuation specialist. Review the Python DCF, scenario outputs, sensitivities, peer comps and technicals. Form an independent valuation view and explain whether the model assumptions are reasonable.",
+            "You are a valuation specialist. Review the company classification, dynamic valuation route, baseline DCF cross-check, sensitivities, peer comps and technicals. Form an independent valuation view and explain whether the selected method is appropriate.",
         ),
     ]
 
@@ -160,10 +179,11 @@ async def run_llm_committee(
     ])
 
     synthesis_pack = {
-        "deterministic_base_dcf": dcfs.get("base").model_dump() if dcfs.get("base") else None,
+        "dynamic_valuation_router_output": dynamic_valuation.model_dump() if dynamic_valuation else None,
+        "company_classification": classification.model_dump() if classification else None,
         "current_price": snapshot.current_price,
         "committee_opinions": [op.model_dump() for op in opinions],
-        "instruction": "Reconcile the deterministic DCF and the LLM committee opinions into a final investment committee view.",
+        "instruction": "Reconcile the dynamic valuation router, baseline model cross-checks and LLM committee opinions into a final investment committee view.",
     }
 
     try:
@@ -176,7 +196,7 @@ async def run_llm_committee(
                         "content": (
                             "You are the chair of an equity research investment committee. Synthesize the bull, bear and valuation analyst views. "
                             "Return JSON only with: final_recommendation, final_target_price, final_confidence, final_thesis, final_risks, final_evidence_gaps. "
-                            "Do not invent facts. Explicitly balance deterministic valuation against judgement-based LLM views."
+                            "Do not invent facts. Explicitly balance the dynamic valuation route, baseline model outputs and judgement-based LLM views."
                         ),
                     },
                     {"role": "user", "content": _json_prompt(synthesis_pack)},
@@ -208,5 +228,8 @@ def run_llm_committee_sync(
     dcfs: dict[str, DCFOutput],
     technicals: TechnicalSnapshot,
     comps: dict[str, Any],
+    classification: CompanyClassification | None = None,
+    dynamic_assumptions: DynamicAssumptions | None = None,
+    dynamic_valuation: DynamicValuationResult | None = None,
 ) -> LLMCommitteeOutput:
-    return asyncio.run(run_llm_committee(snapshot, forecasts, dcfs, technicals, comps))
+    return asyncio.run(run_llm_committee(snapshot, forecasts, dcfs, technicals, comps, classification, dynamic_assumptions, dynamic_valuation))
