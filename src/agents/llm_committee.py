@@ -32,6 +32,20 @@ def llm_enabled() -> bool:
     return settings.enable_llm_committee and settings.openai_api_key not in placeholder_values
 
 
+def model_requires_default_temperature(model: str) -> bool:
+    m = (model or "").lower()
+    return m.startswith("gpt-5") or "gpt-5" in m
+
+
+def openai_chat_kwargs(model: str, messages: list[dict[str, str]], temperature: float | None = None, response_format: dict[str, Any] | None = None) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {"model": model, "messages": messages}
+    if temperature is not None and not model_requires_default_temperature(model):
+        kwargs["temperature"] = temperature
+    if response_format is not None:
+        kwargs["response_format"] = response_format
+    return kwargs
+
+
 def _safe_float(value: Any) -> float | None:
     try:
         if value is None:
@@ -120,13 +134,15 @@ async def _call_agent(
     try:
         response = await asyncio.wait_for(
             client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                temperature=0.2,
-                response_format={"type": "json_object"},
+                **openai_chat_kwargs(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    temperature=0.2,
+                    response_format={"type": "json_object"},
+                )
             ),
             timeout=settings.llm_timeout_seconds,
         )
@@ -189,20 +205,22 @@ async def run_llm_committee(
     try:
         response = await asyncio.wait_for(
             client.chat.completions.create(
-                model=settings.llm_report_writer_model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are the chair of an equity research investment committee. Synthesize the bull, bear and valuation analyst views. "
-                            "Return JSON only with: final_recommendation, final_target_price, final_confidence, final_thesis, final_risks, final_evidence_gaps. "
-                            "Do not invent facts. Explicitly balance the dynamic valuation route, baseline model outputs and judgement-based LLM views."
-                        ),
-                    },
-                    {"role": "user", "content": _json_prompt(synthesis_pack)},
-                ],
-                temperature=0.15,
-                response_format={"type": "json_object"},
+                **openai_chat_kwargs(
+                    model=settings.llm_report_writer_model,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "You are the chair of an equity research investment committee. Synthesize the bull, bear and valuation analyst views. "
+                                "Return JSON only with: final_recommendation, final_target_price, final_confidence, final_thesis, final_risks, final_evidence_gaps. "
+                                "Do not invent facts. Explicitly balance the dynamic valuation route, baseline model outputs and judgement-based LLM views."
+                            ),
+                        },
+                        {"role": "user", "content": _json_prompt(synthesis_pack)},
+                    ],
+                    temperature=0.15,
+                    response_format={"type": "json_object"},
+                )
             ),
             timeout=settings.llm_timeout_seconds,
         )
