@@ -35,7 +35,7 @@ from src.engines.dynamic_valuation_engine import run_dynamic_valuation
 from src.engines.forecast_engine import build_default_assumptions, run_forecast
 from src.engines.sensitivity_engine import growth_margin_sensitivity, wacc_terminal_growth_sensitivity
 from src.engines.technical_engine import run_technical_analysis
-from src.report.excel_exporter import export_excel_model
+from src.report.deep_excel_exporter import export_excel_model
 from src.report.renderer import render_report
 from src.schemas import DynamicValuationResult, FullReport, LLMCommitteeOutput, ReportRequest, SectionOutput
 
