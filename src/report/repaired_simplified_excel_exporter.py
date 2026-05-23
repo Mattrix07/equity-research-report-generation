@@ -1,10 +1,10 @@
-"""Repaired simplified Excel exporter.
+"""Template-controlled simplified Excel exporter.
 
-Keeps the seven-tab simplified workbook, then fixes the model formulas before the
-file is returned. This addresses the generated workbook issues observed in the
-AMGN model: off-by-one assumption links, incorrect opening balance-sheet links,
-circular debt/debt-repayment formulas, DCF linking to ending cash instead of FCF,
-and football-field/comps links pointing to the wrong cells.
+This module is now the stable export path used by the workflow. It keeps the
+seven-tab workbook but treats the workbook as a controlled template: Python
+populates inputs, patches the small set of formula links that must be stable,
+validates the workbook, and optionally asks native Excel to recalculate through
+xlwings when ENABLE_EXCEL_RUNTIME=true.
 """
 from __future__ import annotations
 
@@ -13,6 +13,8 @@ from pathlib import Path
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 
+from src.excel.excel_runtime import recalc_with_excel_if_enabled
+from src.excel.validate_workbook import raise_if_invalid
 from src.report.simplified_excel_exporter import export_excel_model as export_base_model
 from src.schemas import FullReport
 
@@ -31,8 +33,6 @@ def _f(ws, cell: str, formula: str) -> None:
 
 def _patch_assumptions(wb) -> None:
     ws = wb["Assumptions"]
-    # Active assumption rows are 50:61. Scenario table rows are 11:46.
-    # Use SUMIFS to avoid array-style MATCH formulas that can fail in Excel.
     for row in range(50, 62):
         for out_col, source_col in zip("BCDEFGHI", "CDEFGHIJ"):
             _f(ws, f"{out_col}{row}", f'=SUMIFS({source_col}$11:{source_col}$46,$A$11:$A$46,$B$3,$B$11:$B$46,$A{row})')
@@ -45,9 +45,6 @@ def _patch_three_statement(wb, report: FullReport) -> None:
     forecast_cols = [get_column_letter(forecast_start_col + i) for i in range(FORECAST_YEARS)]
     active_cols = [get_column_letter(2 + i) for i in range(FORECAST_YEARS)]
 
-    # Opening BS rows in Assumptions:
-    # 67 cash, 68 AR, 69 inventory, 70 PPE, 71 other assets,
-    # 72 AP, 73 debt, 74 other liabilities, 75 equity.
     cash = "'Assumptions'!$B$67"
     ar = "'Assumptions'!$B$68"
     inventory = "'Assumptions'!$B$69"
@@ -68,9 +65,6 @@ def _patch_three_statement(wb, report: FullReport) -> None:
         prev = get_column_letter(forecast_start_col - 1) if i == 0 else forecast_cols[i - 1]
         first = i == 0
 
-        # Active assumption rows: 50 rev growth, 51 gross margin, 52 EBITDA margin,
-        # 53 D&A, 54 capex, 55 DSO, 56 inventory days, 57 DPO,
-        # 58 tax, 59 interest rate, 60 terminal growth, 61 WACC.
         _f(ws, f"{col}5", f"={prev}5*(1+'Assumptions'!{active_col}$50)")
         _f(ws, f"{col}6", f"={col}5/{prev}5-1")
         _f(ws, f"{col}7", f"={col}5*'Assumptions'!{active_col}$51")
@@ -113,7 +107,10 @@ def _patch_three_statement(wb, report: FullReport) -> None:
         _f(ws, f"{col}45", f"={col}37+{col}38-{col}39+{col}40")
 
 
-def _patch_wacc(wb) -> None:
+def _patch_outputs(wb, report: FullReport) -> None:
+    hist_count = len(_historical_years(report))
+    forecast_start_col = 2 + hist_count
+
     ws = wb["WACC"]
     _f(ws, "B14", "='Assumptions'!B78")
     _f(ws, "B15", "='Assumptions'!B73")
@@ -127,32 +124,26 @@ def _patch_wacc(wb) -> None:
     _f(ws, "B23", "=B17*B9+B18*B21")
     _f(ws, "B24", "=B22")
 
-
-def _patch_dcf(wb, report: FullReport) -> None:
-    ws = wb["DCF"]
-    hist_count = len(_historical_years(report))
-    forecast_start_col = 2 + hist_count
+    dcf = wb["DCF"]
     for i in range(FORECAST_YEARS):
         dcf_col = get_column_letter(2 + i)
         model_col = get_column_letter(forecast_start_col + i)
-        _f(ws, f"{dcf_col}5", f"='3 Statement Model'!{model_col}45")
-        _f(ws, f"{dcf_col}6", f"=1/(1+WACC!$B$24)^{i + 1}")
-        _f(ws, f"{dcf_col}7", f"={dcf_col}5*{dcf_col}6")
-    _f(ws, "J8", "=I5*(1+'Assumptions'!I60)/(WACC!$B$24-'Assumptions'!I60)")
-    _f(ws, "J9", "=J8/(1+WACC!$B$24)^8")
-    _f(ws, "J10", "=SUM(B7:I7)+J9")
-    _f(ws, "J11", "='Assumptions'!B73-'Assumptions'!B67")
-    _f(ws, "J12", "=J10-J11")
-    _f(ws, "J13", "='Assumptions'!B76")
-    _f(ws, "J14", "=J12/J13")
+        _f(dcf, f"{dcf_col}5", f"='3 Statement Model'!{model_col}45")
+        _f(dcf, f"{dcf_col}6", f"=1/(1+WACC!$B$24)^{i + 1}")
+        _f(dcf, f"{dcf_col}7", f"={dcf_col}5*{dcf_col}6")
+    _f(dcf, "J8", "=I5*(1+'Assumptions'!I60)/(WACC!$B$24-'Assumptions'!I60)")
+    _f(dcf, "J9", "=J8/(1+WACC!$B$24)^8")
+    _f(dcf, "J10", "=SUM(B7:I7)+J9")
+    _f(dcf, "J11", "='Assumptions'!B73-'Assumptions'!B67")
+    _f(dcf, "J12", "=J10-J11")
+    _f(dcf, "J13", "='Assumptions'!B76")
+    _f(dcf, "J14", "=J12/J13")
 
-
-def _patch_comps_and_outputs(wb) -> None:
-    ws = wb["Comps Analysis"]
-    _f(ws, "B17", "='Assumptions'!B73-'Assumptions'!B67")
-    _f(ws, "B19", "='Assumptions'!B76")
-    _f(ws, "B20", "=B18/B19")
-    _f(ws, "B21", "='Assumptions'!B5")
+    comps = wb["Comps Analysis"]
+    _f(comps, "B17", "='Assumptions'!B73-'Assumptions'!B67")
+    _f(comps, "B19", "='Assumptions'!B76")
+    _f(comps, "B20", "=B18/B19")
+    _f(comps, "B21", "='Assumptions'!B5")
 
     ff = wb["Football Field"]
     _f(ff, "B5", "=DCF!J14*0.90")
@@ -188,31 +179,23 @@ def _patch_comps_and_outputs(wb) -> None:
                 _f(sens, f"{col}{row_idx}", f"=DCF!J14*(1+({tgr_delta})*8-({wacc_delta})*10)")
 
 
-def _assert_no_stale_references(wb) -> None:
-    stale_fragments = ["B$49", "$B$65", "B65", "B71-'Assumptions'!B65", "B74"]
-    for ws in wb.worksheets:
-        for row in ws.iter_rows():
-            for cell in row:
-                value = cell.value
-                if isinstance(value, str) and value.startswith("="):
-                    if "Assumptions" in value and any(fragment in value for fragment in stale_fragments):
-                        raise ValueError(f"Stale formula reference in {ws.title}!{cell.coordinate}: {value}")
-
-
 def export_excel_model(report: FullReport, output_dir: Path) -> str:
     path = export_base_model(report, output_dir)
     wb = load_workbook(path)
-
     _patch_assumptions(wb)
     _patch_three_statement(wb, report)
-    _patch_wacc(wb)
-    _patch_dcf(wb, report)
-    _patch_comps_and_outputs(wb)
-    _assert_no_stale_references(wb)
-
+    _patch_outputs(wb, report)
     wb.calculation.fullCalcOnLoad = True
     wb.calculation.forceFullCalc = True
     wb.calculation.calcMode = "auto"
-
     wb.save(path)
+
+    raise_if_invalid(path)
+    recalculated, runtime_message = recalc_with_excel_if_enabled(path)
+    wb = load_workbook(path)
+    ws = wb["Assumptions"]
+    ws["D3"] = "Excel Runtime Status"
+    ws["E3"] = runtime_message
+    wb.save(path)
+    raise_if_invalid(path)
     return str(path)
