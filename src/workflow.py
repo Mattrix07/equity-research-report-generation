@@ -35,6 +35,7 @@ from src.engines.dynamic_valuation_engine import run_dynamic_valuation
 from src.engines.forecast_engine import build_default_assumptions, run_forecast
 from src.engines.sensitivity_engine import growth_margin_sensitivity, wacc_terminal_growth_sensitivity
 from src.engines.technical_engine import run_technical_analysis
+from src.report.excel_exporter import export_excel_model
 from src.report.renderer import render_report
 from src.schemas import DynamicValuationResult, FullReport, LLMCommitteeOutput, ReportRequest, SectionOutput
 
@@ -297,6 +298,7 @@ def generate_report(request: ReportRequest) -> FullReport:
     output_root = Path("outputs")
     chart_dir = output_root / "charts"
     report_dir = output_root / "reports"
+    model_dir = output_root / "models"
     chart_paths = [
         chart_forecast_revenue(forecasts, chart_dir, snapshot.ticker),
         chart_margin_forecast(forecasts, chart_dir, snapshot.ticker),
@@ -305,4 +307,5 @@ def generate_report(request: ReportRequest) -> FullReport:
     chart_paths = [p for p in chart_paths if p]
     html_path = render_report(report, report_dir, chart_paths=chart_paths)
     report.html_path = html_path
+    report.excel_model_path = export_excel_model(report, model_dir)
     return report
