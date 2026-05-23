@@ -28,6 +28,7 @@ class ReportRequest(BaseModel):
     sector_hint: str | None = None
     current_price: float | None = None
     peers: list[str] = Field(default_factory=list)
+    source_urls: list[str] = Field(default_factory=list)
 
 
 class ReportPlan(BaseModel):
@@ -198,6 +199,37 @@ class FinancialModelPlan(BaseModel):
     build_warnings: list[str] = Field(default_factory=list)
 
 
+class EvidenceItem(BaseModel):
+    source_type: str
+    source_name: str
+    title: str
+    metric_or_topic: str
+    value: str | None = None
+    period_or_date: str | None = None
+    url: str | None = None
+    excerpt: str = ""
+    confidence: str = "medium"
+
+
+class SectorTabEvidence(BaseModel):
+    tab_name: str
+    rows: list[dict[str, Any]] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
+class CompanyEvidencePack(BaseModel):
+    ticker: str
+    evidence_items: list[EvidenceItem] = Field(default_factory=list)
+    source_urls: list[str] = Field(default_factory=list)
+    sec_filings: list[dict[str, Any]] = Field(default_factory=list)
+    management_guidance: list[EvidenceItem] = Field(default_factory=list)
+    investor_presentation_evidence: list[EvidenceItem] = Field(default_factory=list)
+    research_report_evidence: list[EvidenceItem] = Field(default_factory=list)
+    sector_tab_evidence: dict[str, SectorTabEvidence] = Field(default_factory=dict)
+    gaps: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
 class DynamicValuationResult(BaseModel):
     selected_methods: list[ValuationMethod]
     primary_method: ValuationMethod
@@ -261,6 +293,7 @@ class FullReport(BaseModel):
     company_classification: CompanyClassification | None = None
     dynamic_assumptions: DynamicAssumptions | None = None
     financial_model_plan: FinancialModelPlan | None = None
+    company_evidence: CompanyEvidencePack | None = None
     dynamic_valuation: DynamicValuationResult | None = None
     llm_committee: LLMCommitteeOutput | None = None
     html_path: str | None = None
