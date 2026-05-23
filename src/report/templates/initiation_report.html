@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{ report.snapshot.company_name }} Equity Research Report</title>
+  <style>
+    :root { --ink:#0f172a; --muted:#64748b; --line:#dbe3ef; --panel:#f8fafc; --accent:#075985; }
+    body { margin:0; font-family: Arial, Helvetica, sans-serif; color:var(--ink); background:#eef2f7; }
+    .page { width: 1060px; margin: 24px auto; background:white; box-shadow:0 12px 30px rgba(15,23,42,.12); padding: 34px 42px; }
+    .header { display:flex; justify-content:space-between; border-bottom:3px solid var(--accent); padding-bottom:14px; margin-bottom:20px; }
+    .eyebrow { color:var(--muted); text-transform:uppercase; font-size:12px; letter-spacing:.08em; }
+    h1 { font-size:28px; line-height:1.1; margin:4px 0; }
+    h2 { font-size:20px; color:var(--accent); margin:26px 0 10px; border-bottom:1px solid var(--line); padding-bottom:6px; }
+    h3 { margin:18px 0 8px; }
+    p { line-height:1.45; }
+    .snapshot { display:grid; grid-template-columns:repeat(6, 1fr); gap:10px; margin:18px 0; }
+    .card { border:1px solid var(--line); background:var(--panel); border-radius:10px; padding:12px; }
+    .label { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; }
+    .value { font-size:20px; font-weight:bold; margin-top:4px; }
+    .grid2 { display:grid; grid-template-columns: 1fr 1fr; gap:18px; }
+    .grid3 { display:grid; grid-template-columns: repeat(3, 1fr); gap:14px; }
+    ul { margin-top:8px; padding-left:20px; }
+    li { margin-bottom:6px; line-height:1.35; }
+    table { width:100%; border-collapse:collapse; margin:10px 0 18px; font-size:13px; }
+    th { background:#075985; color:white; text-align:left; padding:8px; }
+    td { border-bottom:1px solid var(--line); padding:8px; vertical-align:top; }
+    .section { break-inside: avoid; }
+    .chart { width:100%; max-height:420px; object-fit:contain; border:1px solid var(--line); border-radius:8px; margin:10px 0; }
+    .note { color:var(--muted); font-size:12px; border-top:1px solid var(--line); margin-top:30px; padding-top:12px; }
+    @media print { body { background:white; } .page { box-shadow:none; margin:0 auto; page-break-after:always; } }
+  </style>
+</head>
+<body>
+<div class="page">
+  <div class="header">
+    <div>
+      <div class="eyebrow">Equity Research | {{ report.plan.sector }} | {{ report.plan.report_type|replace('_',' ')|title }}</div>
+      <h1>{{ report.snapshot.company_name }} ({{ report.snapshot.ticker }})</h1>
+      <div>{{ report.snapshot.industry }} | {{ report.snapshot.currency }}</div>
+    </div>
+    <div style="text-align:right">
+      <div class="eyebrow">Prototype generated report</div>
+      <h1>{{ report.recommendation }}</h1>
+      <div>Target: {{ report.target_price|money }} | Upside: {{ report.upside_downside|pct }}</div>
+    </div>
+  </div>
+
+  <div class="snapshot">
+    <div class="card"><div class="label">Current price</div><div class="value">{{ report.snapshot.current_price|money }}</div></div>
+    <div class="card"><div class="label">Target price</div><div class="value">{{ report.target_price|money }}</div></div>
+    <div class="card"><div class="label">Upside</div><div class="value">{{ report.upside_downside|pct }}</div></div>
+    <div class="card"><div class="label">Market cap</div><div class="value">{{ report.snapshot.market_cap|money }}</div></div>
+    <div class="card"><div class="label">EV</div><div class="value">{{ report.snapshot.enterprise_value|money }}</div></div>
+    <div class="card"><div class="label">Beta</div><div class="value">{{ report.snapshot.beta|fmt }}</div></div>
+  </div>
+
+  {% for section in report.sections %}
+  <div class="section">
+    <h2>{{ section.title }}</h2>
+    {% if section.narrative %}<p>{{ section.narrative }}</p>{% endif %}
+    {% if section.bullets %}
+    <ul>{% for bullet in section.bullets %}<li>{{ bullet }}</li>{% endfor %}</ul>
+    {% endif %}
+    {% for table in section.tables %}
+      <h3>{{ table.name }}</h3>
+      {% if table.rows and table.rows|length > 0 %}
+      <table>
+        <thead><tr>{% for key in table.rows[0].keys() %}<th>{{ key|replace('_',' ')|title }}</th>{% endfor %}</tr></thead>
+        <tbody>
+          {% for row in table.rows %}
+          <tr>{% for value in row.values() %}<td>{{ value|fmt }}</td>{% endfor %}</tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% else %}<p>No table data available.</p>{% endif %}
+    {% endfor %}
+  </div>
+  {% endfor %}
+
+  <h2>Forecast summary</h2>
+  <div class="grid3">
+    {% for scenario, rows in report.forecasts.items() %}
+    <div class="card">
+      <h3>{{ scenario|title }} case</h3>
+      <table>
+        <thead><tr><th>Year</th><th>Revenue</th><th>EBITDA margin</th><th>FCF</th></tr></thead>
+        <tbody>
+        {% for row in rows %}
+          <tr><td>{{ row.year }}</td><td>{{ row.revenue|money }}</td><td>{{ row.ebitda_margin|pct }}</td><td>{{ row.fcf|money }}</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endfor %}
+  </div>
+
+  <h2>Sensitivity analysis</h2>
+  {% for sens in report.sensitivities %}
+    <h3>{{ sens.title }}</h3>
+    <table>
+      <thead><tr><th>{{ sens.row_label }} \ {{ sens.column_label }}</th>{% for col in sens.columns %}<th>{{ col|pct }}</th>{% endfor %}</tr></thead>
+      <tbody>
+      {% for row_value in sens.rows %}
+        {% set row_loop = loop.index0 %}
+        <tr><td>{{ row_value|pct }}</td>{% for value in sens.values[row_loop] %}<td>{{ value|money }}</td>{% endfor %}</tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  {% endfor %}
+
+  <h2>Charts</h2>
+  {% for chart_path in chart_paths %}
+    <img class="chart" src="/{{ chart_path }}" />
+  {% endfor %}
+
+  <div class="note">
+    Prototype only. Not investment advice. Outputs are generated from public market data and deterministic model assumptions; analyst review and primary-source verification are required before use.
+  </div>
+</div>
+</body>
+</html>
