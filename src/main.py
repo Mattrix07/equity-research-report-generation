@@ -9,7 +9,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 import uvicorn
 
@@ -42,6 +42,7 @@ def create_initiation_report(request: ReportRequest):
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     report_url = f"/{report.html_path}" if report.html_path else None
+    model_url = f"/{report.excel_model_path}" if report.excel_model_path else None
     return {
         "ticker": report.snapshot.ticker,
         "company_name": report.snapshot.company_name,
@@ -50,7 +51,14 @@ def create_initiation_report(request: ReportRequest):
         "upside_downside": report.upside_downside,
         "report_path": report.html_path,
         "report_url": report_url,
+        "excel_model_path": report.excel_model_path,
+        "excel_model_url": model_url,
     }
+
+
+@app.post("/model/excel")
+def create_excel_model(request: ReportRequest):
+    return create_initiation_report(request)
 
 
 @app.post("/report/update")
