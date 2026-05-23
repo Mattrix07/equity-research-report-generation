@@ -172,6 +172,32 @@ class DynamicAssumptions(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+class ModelTabPlan(BaseModel):
+    tab_name: str
+    purpose: str
+    key_outputs: list[str] = Field(default_factory=list)
+    key_inputs: list[str] = Field(default_factory=list)
+    linked_to: list[str] = Field(default_factory=list)
+
+
+class ForecastDriver(BaseModel):
+    driver_name: str
+    formula_or_logic: str
+    evidence_required: list[str] = Field(default_factory=list)
+    current_status: str = "needs_review"
+
+
+class FinancialModelPlan(BaseModel):
+    model_type: str
+    model_principle: str
+    workbook_tabs: list[ModelTabPlan] = Field(default_factory=list)
+    forecast_drivers: list[ForecastDriver] = Field(default_factory=list)
+    assumption_audit_trail: list[str] = Field(default_factory=list)
+    valuation_stack: list[str] = Field(default_factory=list)
+    sensitivity_cases: list[str] = Field(default_factory=list)
+    build_warnings: list[str] = Field(default_factory=list)
+
+
 class DynamicValuationResult(BaseModel):
     selected_methods: list[ValuationMethod]
     primary_method: ValuationMethod
@@ -234,6 +260,7 @@ class FullReport(BaseModel):
     upside_downside: float | None
     company_classification: CompanyClassification | None = None
     dynamic_assumptions: DynamicAssumptions | None = None
+    financial_model_plan: FinancialModelPlan | None = None
     dynamic_valuation: DynamicValuationResult | None = None
     llm_committee: LLMCommitteeOutput | None = None
     html_path: str | None = None
