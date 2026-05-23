@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Equity Research Report Generator</title>
+  <style>
+    body { margin:0; font-family: Arial, Helvetica, sans-serif; background:#eef2f7; color:#0f172a; }
+    .wrap { max-width: 980px; margin: 40px auto; background:white; border-radius:18px; padding:32px; box-shadow:0 20px 40px rgba(15,23,42,.12); }
+    h1 { margin:0 0 8px; font-size:32px; }
+    p { color:#475569; line-height:1.45; }
+    form { display:grid; gap:14px; margin-top:24px; }
+    label { font-weight:bold; }
+    input, select { width:100%; box-sizing:border-box; padding:12px 14px; border:1px solid #cbd5e1; border-radius:10px; font-size:16px; }
+    button { background:#075985; color:white; border:none; border-radius:10px; padding:14px 18px; font-size:16px; font-weight:bold; cursor:pointer; }
+    button:hover { background:#0369a1; }
+    .grid { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+    .status { margin-top:22px; padding:14px; border-radius:12px; background:#f8fafc; border:1px solid #dbe3ef; white-space:pre-wrap; }
+    a { color:#075985; font-weight:bold; }
+    .small { font-size:13px; color:#64748b; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Equity Research Report Generator</h1>
+    <p>Generate a structured localhost equity research report with a multi-agent workflow, deterministic forecasts, DCF valuation, sensitivity analysis, peer comps, technical indicators, charts and risk review.</p>
+    <form id="reportForm">
+      <div class="grid">
+        <div>
+          <label for="ticker">Ticker</label>
+          <input id="ticker" name="ticker" value="AAPL" required />
+        </div>
+        <div>
+          <label for="company_name">Company name optional</label>
+          <input id="company_name" name="company_name" placeholder="Apple Inc." />
+        </div>
+      </div>
+      <div class="grid">
+        <div>
+          <label for="report_type">Report type</label>
+          <select id="report_type" name="report_type">
+            <option value="initiation">Initiation report</option>
+            <option value="update">Update report</option>
+            <option value="quick">Quick view</option>
+            <option value="valuation_only">Valuation only</option>
+            <option value="healthcare_initiation">Healthcare initiation</option>
+          </select>
+        </div>
+        <div>
+          <label for="peers">Peers optional, comma separated</label>
+          <input id="peers" name="peers" placeholder="MSFT,GOOGL,META" />
+        </div>
+      </div>
+      <button type="submit">Generate report</button>
+    </form>
+    <div id="status" class="status">Ready.</div>
+    <p class="small">Prototype only. Not investment advice. Review source data, assumptions and outputs before relying on any report.</p>
+  </div>
+
+<script>
+const form = document.getElementById('reportForm');
+const statusEl = document.getElementById('status');
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  statusEl.textContent = 'Generating report. This may take 30-90 seconds depending on yfinance responses...';
+  const data = Object.fromEntries(new FormData(form).entries());
+  const peers = data.peers ? data.peers.split(',').map(x => x.trim()).filter(Boolean) : [];
+  const payload = {
+    ticker: data.ticker,
+    company_name: data.company_name || null,
+    report_type: data.report_type,
+    peers
+  };
+  try {
+    const res = await fetch('/report/initiation', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const json = await res.json();
+    if (!res.ok) throw new Error(json.detail || JSON.stringify(json));
+    statusEl.innerHTML = `Report generated.\n\nRecommendation: ${json.recommendation}\nTarget price: ${json.target_price ?? 'n/a'}\nUpside/downside: ${json.upside_downside == null ? 'n/a' : (json.upside_downside * 100).toFixed(1) + '%'}\n\n<a href="${json.report_url}" target="_blank">Open report</a>`;
+  } catch (err) {
+    statusEl.textContent = 'Error: ' + err.message;
+  }
+});
+</script>
+</body>
+</html>
