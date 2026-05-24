@@ -1,15 +1,16 @@
 """Main report-generation workflow.
 
-The workflow is now model-first:
-1. collect market and financial data;
-2. build and validate a bear/base/bull DCF financial model;
-3. stop if the model is invalid;
-4. generate Excel from the validated model;
-5. generate the written report from the validated model outputs.
+The workflow is model-first and progress-aware:
+1. manager plans the request;
+2. data and evidence agents collect inputs;
+3. model validation agent builds and validates bear/base/bull DCF outputs;
+4. parallel LLM committee runs when enabled;
+5. Excel and report outputs are generated from the validated model.
 """
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, Callable
 
 from src.agents.company_classifier_agent import classify_company
 from src.agents.evidence_agent import build_company_evidence_pack
@@ -46,6 +47,36 @@ from src.engines.technical_engine import run_technical_analysis
 from src.report.validated_model_excel_exporter import export_excel_model
 from src.report.renderer import render_report
 from src.schemas import CompanyEvidencePack, DynamicValuationResult, FullReport, LLMCommitteeOutput, ReportRequest, SectionOutput
+
+ProgressCallback = Callable[[dict[str, Any]], None]
+
+
+def _emit(
+    progress_callback: ProgressCallback | None,
+    *,
+    agent: str,
+    status: str,
+    message: str,
+    phase: str,
+    mode: str = "sequential",
+    group: str | None = None,
+    reasoning_steps: list[str] | None = None,
+    payload: dict[str, Any] | None = None,
+) -> None:
+    if not progress_callback:
+        return
+    progress_callback(
+        {
+            "agent": agent,
+            "status": status,
+            "message": message,
+            "phase": phase,
+            "mode": mode,
+            "group": group,
+            "reasoning_steps": reasoning_steps or [],
+            "payload": payload or {},
+        }
+    )
 
 
 def _recommendation(current_price: float | None, target_price: float | None) -> tuple[str, float | None]:
@@ -210,7 +241,19 @@ def _company_evidence_section(evidence: CompanyEvidencePack) -> SectionOutput:
     )
 
 
-def generate_report(request: ReportRequest) -> FullReport:
+def generate_report(request: ReportRequest, progress_callback: ProgressCallback | None = None) -> FullReport:
+    _emit(
+        progress_callback,
+        agent="Manager",
+        status="running",
+        phase="planning",
+        message="Decomposing the request into data, model-validation, valuation, report and output tasks.",
+        reasoning_steps=[
+            "Confirm ticker and report type.",
+            "Route the workflow through the model-first validation gate before report writing.",
+        ],
+    )
+
     snapshot = fetch_market_snapshot(request.ticker, request.company_name)
     if request.current_price:
         snapshot.current_price = request.current_price
@@ -223,14 +266,68 @@ def generate_report(request: ReportRequest) -> FullReport:
         report_type=request.report_type,
         sector=snapshot.sector,
     )
+    _emit(
+        progress_callback,
+        agent="Manager",
+        status="complete",
+        phase="planning",
+        message=f"Research plan created for {snapshot.ticker}: {plan.report_type} report.",
+        payload={"ticker": snapshot.ticker, "company_name": snapshot.company_name, "report_type": plan.report_type},
+    )
 
+    _emit(
+        progress_callback,
+        agent="Financial Data Fetcher",
+        status="running",
+        phase="data_collection",
+        group="Data collection",
+        mode="parallel-ready",
+        message="Fetching historical financial statements from yfinance.",
+        reasoning_steps=[
+            "Collect revenue, EBITDA, EBIT, net income, operating cash flow, capex and free cash flow.",
+            "These data points feed the financial model validation gate.",
+        ],
+    )
     historicals = fetch_historical_financials(snapshot.ticker)
+    _emit(
+        progress_callback,
+        agent="Financial Data Fetcher",
+        status="complete",
+        phase="data_collection",
+        group="Data collection",
+        mode="parallel-ready",
+        message=f"Financial history collected: {len(historicals.revenue)} revenue years available.",
+        payload={"revenue_years": sorted(historicals.revenue.keys())},
+    )
 
-    # MODEL-FIRST VALIDATION GATE
+    _emit(
+        progress_callback,
+        agent="Model Validation Agent",
+        status="running",
+        phase="model_validation",
+        message="Building and validating bear, base and bull DCF outputs before report generation.",
+        reasoning_steps=[
+            "Derive forecast assumptions from historical company data where available.",
+            "Check data sufficiency, FCF reconciliation, EV reconciliation, equity value reconciliation and per-share target price math.",
+            "Block report generation if the model does not pass validation.",
+        ],
+    )
     validated_model = build_validated_financial_model(snapshot, historicals)
     raise_if_model_invalid(validated_model)
+    _emit(
+        progress_callback,
+        agent="Model Validation Agent",
+        status="complete",
+        phase="model_validation",
+        message="Validated financial model passed. Bear/base/bull DCF prices are now the report source of truth.",
+        payload=validated_model.valuation_summary,
+        reasoning_steps=[
+            f"Bear target: {validated_model.valuation_summary.get('bear_target_price')}",
+            f"Base target: {validated_model.valuation_summary.get('base_target_price')}",
+            f"Bull target: {validated_model.valuation_summary.get('bull_target_price')}",
+        ],
+    )
 
-    # Use the validated model as the report source of truth.
     assumptions = {
         "bear": validated_model.scenarios["bear"].assumptions,
         "base": validated_model.scenarios["base"].assumptions,
@@ -247,13 +344,53 @@ def generate_report(request: ReportRequest) -> FullReport:
         "bull": validated_model.scenarios["bull"].dcf,
     }
 
+    _emit(
+        progress_callback,
+        agent="Technical Data Fetcher",
+        status="running",
+        phase="data_collection",
+        group="Data collection",
+        mode="parallel-ready",
+        message="Fetching price history and calculating moving-average/technical signals.",
+    )
     price_history = fetch_price_history(snapshot.ticker)
     technicals = run_technical_analysis(price_history)
+    _emit(
+        progress_callback,
+        agent="Technical Data Fetcher",
+        status="complete",
+        phase="data_collection",
+        group="Data collection",
+        mode="parallel-ready",
+        message="Technical signals calculated.",
+        payload=technicals.model_dump(),
+    )
 
+    _emit(
+        progress_callback,
+        agent="Classification Agent",
+        status="running",
+        phase="company_context",
+        message="Classifying company type and valuation context.",
+    )
     company_classification = classify_company(snapshot, historicals)
-    # Keep these agents for planning/evidence, but they no longer override the validated model.
-    dynamic_assumptions = None
+    _emit(
+        progress_callback,
+        agent="Classification Agent",
+        status="complete",
+        phase="company_context",
+        message=f"Company classified as {company_classification.primary_type}; valuation methods: {', '.join(company_classification.valuation_methods)}.",
+    )
+
     from src.agents.assumption_derivation_agent import derive_dynamic_assumptions
+
+    _emit(
+        progress_callback,
+        agent="Assumption Evidence Agent",
+        status="running",
+        phase="company_context",
+        message="Deriving assumption context and collecting model evidence.",
+    )
     dynamic_assumptions = derive_dynamic_assumptions(snapshot, historicals, company_classification)
     financial_model_plan = build_financial_model_plan(snapshot, historicals, company_classification, dynamic_assumptions)
     company_evidence = build_company_evidence_pack(
@@ -264,7 +401,25 @@ def generate_report(request: ReportRequest) -> FullReport:
         model_plan=financial_model_plan,
         source_urls=request.source_urls,
     )
+    _emit(
+        progress_callback,
+        agent="Assumption Evidence Agent",
+        status="complete",
+        phase="company_context",
+        message=f"Evidence pack built with {len(company_evidence.evidence_items)} evidence items and {len(company_evidence.gaps)} gaps flagged.",
+    )
 
+    _emit(
+        progress_callback,
+        agent="Peer Selector Agent",
+        status="running",
+        phase="valuation_context",
+        message="Selecting dynamic peers and fetching peer data for comps context.",
+        reasoning_steps=[
+            "Avoid static sector peer lists.",
+            "Score peers using industry, sector, market cap, revenue scale and business-description overlap.",
+        ],
+    )
     peers = select_dynamic_peer_tickers(snapshot, request.peers, min_peers=4, max_peers=5)
     peer_snapshots = fetch_peer_snapshot(peers) if peers else []
     company_ebitda = snapshot.ebitda or forecasts["base"][0].ebitda
@@ -272,7 +427,22 @@ def generate_report(request: ReportRequest) -> FullReport:
     shares = snapshot.shares_outstanding
     comps = run_comps(peer_snapshots, company_ebitda, net_debt, shares)
     comps["selected_peer_tickers"] = peers
+    _emit(
+        progress_callback,
+        agent="Peer Selector Agent",
+        status="complete",
+        phase="valuation_context",
+        message=f"Dynamic peer set selected: {', '.join(peers) if peers else 'n/a'}.",
+        payload={"peers": peers},
+    )
 
+    _emit(
+        progress_callback,
+        agent="Valuation Router",
+        status="running",
+        phase="valuation_context",
+        message="Reconciling validated DCF outputs with comps and company classification.",
+    )
     dynamic_valuation = run_dynamic_valuation(
         snapshot=snapshot,
         historicals=historicals,
@@ -289,7 +459,29 @@ def generate_report(request: ReportRequest) -> FullReport:
     dynamic_valuation.recommendation = recommendation
     dynamic_valuation.upside_downside = upside
     dynamic_valuation.valuation_outputs["validated_model"] = validated_model.model_dump()
+    _emit(
+        progress_callback,
+        agent="Valuation Router",
+        status="complete",
+        phase="valuation_context",
+        message=f"Validated base DCF target set as report target: {target_price}.",
+        payload={"recommendation": recommendation, "target_price": target_price, "upside_downside": upside},
+    )
 
+    _emit(
+        progress_callback,
+        agent="LLM Committee",
+        status="running",
+        phase="investment_committee",
+        group="Parallel LLM agents",
+        mode="parallel",
+        message="Dispatching Bull Analyst, Bear Analyst and Valuation Analyst in parallel when LLM committee is enabled.",
+        reasoning_steps=[
+            "Bull Analyst tests upside thesis and catalysts.",
+            "Bear Analyst stress-tests risks and downside.",
+            "Valuation Analyst reviews DCF, comps and method fit.",
+        ],
+    )
     llm_committee = run_llm_committee_sync(
         snapshot,
         forecasts,
@@ -301,14 +493,37 @@ def generate_report(request: ReportRequest) -> FullReport:
         dynamic_valuation,
     )
     if llm_committee.enabled and llm_committee.final_recommendation:
-        # LLM can influence narrative, but the validated model remains the price source of truth.
         recommendation = llm_committee.final_recommendation
+    _emit(
+        progress_callback,
+        agent="Committee Chair",
+        status="complete" if llm_committee.enabled else "skipped",
+        phase="investment_committee",
+        group="Sequential synthesis",
+        mode="sequential",
+        message=(
+            "Committee synthesis complete." if llm_committee.enabled else "LLM committee disabled; continuing with deterministic model outputs."
+        ),
+        payload={
+            "enabled": llm_committee.enabled,
+            "final_recommendation": llm_committee.final_recommendation,
+            "final_target_price": llm_committee.final_target_price,
+            "synthesis_error": llm_committee.synthesis_error,
+        },
+    )
 
     sensitivities = [
         wacc_terminal_growth_sensitivity(forecasts["base"], assumptions["base"], net_debt, shares),
         growth_margin_sensitivity(historicals, assumptions["base"], net_debt, shares),
     ]
 
+    _emit(
+        progress_callback,
+        agent="Report Agents",
+        status="running",
+        phase="report_generation",
+        message="Building report sections from the validated model, company context, valuation outputs and committee views.",
+    )
     sections: list[SectionOutput] = [
         front_page_agent(snapshot, recommendation, target_price, upside),
         executive_summary_agent(snapshot, dcfs["base"], recommendation),
@@ -341,6 +556,7 @@ def generate_report(request: ReportRequest) -> FullReport:
         risk_agent(snapshot, upside),
         qa_agent(plan, snapshot, dcfs),
     ]
+    _emit(progress_callback, agent="Report Agents", status="complete", phase="report_generation", message="Report sections built.")
 
     report = FullReport(
         plan=plan,
@@ -369,6 +585,8 @@ def generate_report(request: ReportRequest) -> FullReport:
     chart_dir = output_root / "charts"
     report_dir = output_root / "reports"
     model_dir = output_root / "models"
+
+    _emit(progress_callback, agent="Output Renderer", status="running", phase="outputs", message="Rendering charts, HTML report and validated Excel model.")
     chart_paths = [
         chart_forecast_revenue(forecasts, chart_dir, snapshot.ticker),
         chart_margin_forecast(forecasts, chart_dir, snapshot.ticker),
@@ -377,4 +595,12 @@ def generate_report(request: ReportRequest) -> FullReport:
     chart_paths = [p for p in chart_paths if p]
     report.html_path = render_report(report, report_dir, chart_paths=chart_paths)
     report.excel_model_path = export_excel_model(report, model_dir)
+    _emit(
+        progress_callback,
+        agent="Output Renderer",
+        status="complete",
+        phase="outputs",
+        message="Final report and validated Excel model generated.",
+        payload={"html_path": report.html_path, "excel_model_path": report.excel_model_path},
+    )
     return report
