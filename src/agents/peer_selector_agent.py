@@ -2,14 +2,15 @@
 
 The selector avoids static sector defaults, but it should also avoid the previous
 slow path of calling yfinance for the entire broad universe on every request.
-It now shortlists candidates by sector/industry/business keywords first, then
-fetches only the most relevant candidates concurrently and scores those.
+It shortlists candidates by sector/industry/business keywords first, then fetches
+only the most relevant candidates concurrently and scores those.
 
 User-supplied peers still take precedence.
 """
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import json
 import math
 import re
 from functools import lru_cache
@@ -19,12 +20,14 @@ from src.data.yfinance_client import fetch_market_snapshot
 from src.schemas import MarketSnapshot
 
 CANDIDATE_UNIVERSE = sorted(set([
+    # Internet platforms, digital advertising, streaming and marketplace peers
+    "META", "GOOGL", "SNAP", "PINS", "RDDT", "TTD", "NFLX", "SPOT", "ROKU", "BIDU", "TCEHY", "AMZN", "MSFT", "AAPL",
     # Networking, communications infrastructure, security and adjacent infrastructure software
     "CSCO", "ANET", "JNPR", "HPE", "DELL", "NTAP", "PSTG", "FFIV", "CIEN", "COMM", "UI", "MSI", "PANW", "FTNT", "CHKP", "ZS", "CRWD", "NET",
     # Mega / large-cap tech and software
-    "AAPL", "MSFT", "GOOGL", "META", "AMZN", "ORCL", "CRM", "ADBE", "NOW", "INTU", "IBM", "SAP", "SNOW", "DDOG",
+    "ORCL", "CRM", "ADBE", "NOW", "INTU", "IBM", "SAP", "SNOW", "DDOG",
     # Semis / hardware
-    "NVDA", "AMD", "AVGO", "QCOM", "INTC", "TXN", "MU", "AMAT", "LRCX", "KLAC", "ADI", "MRVL",
+    "NVDA", "AMD", "AVGO", "QCOM", "INTC", "TXN", "MU", "AMAT", "LRCX", "KLAC", "ADI", "MRVL", "TSM", "ASML", "ARM", "SMCI",
     # Biotech / pharma
     "AMGN", "GILD", "REGN", "VRTX", "BIIB", "MRNA", "INCY", "ALNY", "BMRN", "UTHR", "ARGX", "IONS",
     "LLY", "NVO", "MRK", "PFE", "ABBV", "BMY", "AZN", "NVS", "GSK", "SNY", "TAK", "RHHBY",
@@ -37,7 +40,7 @@ CANDIDATE_UNIVERSE = sorted(set([
     # Insurance
     "BRK-B", "AIG", "TRV", "PGR", "CB", "MET", "PRU", "ALL", "AFL", "AON", "MMC",
     # Consumer
-    "WMT", "COST", "TGT", "HD", "LOW", "MCD", "SBUX", "NKE", "LULU", "TJX", "ROST", "AMZN",
+    "WMT", "COST", "TGT", "HD", "LOW", "MCD", "SBUX", "NKE", "LULU", "TJX", "ROST",
     # Industrials
     "CAT", "DE", "HON", "GE", "MMM", "ETN", "EMR", "PH", "ROK", "ITW", "UPS", "FDX", "UNP", "CSX",
     # Energy / resources
@@ -47,7 +50,8 @@ CANDIDATE_UNIVERSE = sorted(set([
 ]))
 
 SECTOR_SHORTLISTS = {
-    "technology": ["MSFT", "ORCL", "IBM", "CRM", "ADBE", "NOW", "ANET", "JNPR", "HPE", "DELL", "NTAP", "PANW", "FTNT", "CHKP", "FFIV", "CIEN"],
+    "communication": ["GOOGL", "SNAP", "PINS", "RDDT", "TTD", "NFLX", "SPOT", "ROKU", "BIDU", "TCEHY", "AMZN", "MSFT"],
+    "technology": ["MSFT", "ORCL", "IBM", "CRM", "ADBE", "NOW", "ANET", "JNPR", "HPE", "DELL", "NTAP", "PANW", "FTNT", "CHKP", "FFIV", "CIEN", "GOOGL", "META", "AMZN", "TTD"],
     "healthcare": ["JNJ", "PFE", "MRK", "ABBV", "BMY", "AMGN", "GILD", "REGN", "VRTX", "TMO", "DHR", "ABT", "MDT", "SYK"],
     "financial": ["JPM", "BAC", "WFC", "C", "GS", "MS", "USB", "PNC", "SCHW", "BLK"],
     "consumer": ["WMT", "COST", "TGT", "HD", "LOW", "MCD", "SBUX", "NKE", "LULU", "TJX"],
@@ -56,12 +60,21 @@ SECTOR_SHORTLISTS = {
 }
 
 KEYWORD_SHORTLISTS = {
+    "advertising": ["GOOGL", "SNAP", "PINS", "RDDT", "TTD", "AMZN", "BIDU"],
+    "social": ["GOOGL", "SNAP", "PINS", "RDDT", "TCEHY"],
+    "media": ["GOOGL", "NFLX", "SPOT", "ROKU", "SNAP", "PINS"],
+    "metaverse": ["GOOGL", "MSFT", "AAPL", "NVDA", "SNAP"],
+    "platform": ["GOOGL", "AMZN", "MSFT", "AAPL", "SNAP", "PINS", "TTD"],
     "network": ["ANET", "JNPR", "HPE", "DELL", "FFIV", "CIEN", "COMM", "UI", "MSI"],
     "switch": ["ANET", "JNPR", "HPE", "DELL", "FFIV"],
     "router": ["ANET", "JNPR", "HPE", "FFIV"],
     "security": ["PANW", "FTNT", "CHKP", "ZS", "CRWD", "NET"],
     "cloud": ["MSFT", "AMZN", "GOOGL", "ORCL", "IBM", "SNOW", "DDOG", "NET"],
-    "semiconductor": ["NVDA", "AMD", "AVGO", "QCOM", "INTC", "TXN", "MRVL"],
+    "semiconductor": ["NVDA", "AMD", "AVGO", "QCOM", "INTC", "TXN", "MRVL", "TSM", "ASML", "ARM", "SMCI"],
+    "gpu": ["AMD", "AVGO", "TSM", "ASML", "MRVL", "ARM", "SMCI"],
+    "graphics": ["AMD", "AVGO", "TSM", "ASML", "MRVL", "ARM", "SMCI"],
+    "data center": ["AMD", "AVGO", "TSM", "ASML", "MRVL", "ANET", "SMCI"],
+    "accelerated": ["AMD", "AVGO", "TSM", "ASML", "MRVL", "ARM", "SMCI"],
     "biotech": ["AMGN", "GILD", "REGN", "VRTX", "BIIB", "MRNA", "ALNY", "BMRN"],
     "pharma": ["LLY", "NVO", "MRK", "PFE", "ABBV", "BMY", "AZN", "NVS"],
     "medical": ["TMO", "DHR", "ABT", "MDT", "SYK", "BSX", "ISRG", "EW"],
@@ -73,8 +86,29 @@ STOPWORDS = {
 }
 
 
-def _tokens(text: str) -> set[str]:
-    words = re.findall(r"[a-zA-Z][a-zA-Z0-9]{2,}", (text or "").lower())
+def _as_text(value: Any) -> str:
+    """Defensively coerce provider/LLM values before regex or `.lower()` calls.
+
+    Some upstream providers can return tuples/lists for text-like fields. Passing
+    those directly into `re.findall` causes: expected string or bytes-like object,
+    got 'tuple'.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="ignore")
+    if isinstance(value, (tuple, list, set)):
+        return " ".join(_as_text(item) for item in value)
+    if isinstance(value, dict):
+        return json.dumps(value, default=str)
+    return str(value)
+
+
+def _tokens(text: Any) -> set[str]:
+    safe_text = _as_text(text).lower()
+    words = re.findall(r"[a-zA-Z][a-zA-Z0-9]{2,}", safe_text)
     return {w for w in words if w not in STOPWORDS}
 
 
@@ -91,8 +125,14 @@ def _cached_snapshot(ticker: str) -> MarketSnapshot:
 
 
 def _candidate_shortlist(target: MarketSnapshot, max_candidates: int = 28) -> list[str]:
-    target_text = f"{target.sector} {target.industry} {target.business_summary}".lower()
+    target_text = _as_text([target.sector, target.industry, target.business_summary]).lower()
     candidates: list[str] = []
+
+    if target.ticker.upper() in {"META", "GOOGL", "SNAP", "PINS", "RDDT", "TTD"} or any(x in target_text for x in ["advertising", "social", "family of apps", "digital", "internet content", "communication services"]):
+        candidates.extend(["GOOGL", "SNAP", "PINS", "RDDT", "TTD", "NFLX", "SPOT", "ROKU", "AMZN", "MSFT", "TCEHY", "BIDU"])
+
+    if target.ticker.upper() in {"NVDA", "AMD", "AVGO", "MRVL", "TSM", "ASML", "ARM"} or any(x in target_text for x in ["semiconductor", "gpu", "graphics", "data center", "accelerated computing"]):
+        candidates.extend(["AMD", "AVGO", "TSM", "ASML", "MRVL", "QCOM", "ARM", "MU", "ANET", "SMCI"])
 
     for sector_key, tickers in SECTOR_SHORTLISTS.items():
         if sector_key in target_text:
@@ -102,8 +142,6 @@ def _candidate_shortlist(target: MarketSnapshot, max_candidates: int = 28) -> li
         if keyword in target_text:
             candidates.extend(tickers)
 
-    # If the text match is sparse, use the broad universe as a fallback, but cap
-    # the fetch count. This keeps the UI from sitting on peer selection for ages.
     if not candidates:
         candidates.extend(CANDIDATE_UNIVERSE[:max_candidates])
 
@@ -117,6 +155,25 @@ def _score_peer(target: MarketSnapshot, peer: MarketSnapshot) -> tuple[float, li
 
     if peer.ticker.upper() == target.ticker.upper():
         return -999.0, ["excluded: same ticker"]
+
+    target_text = _as_text([target.industry, target.business_summary]).lower()
+    peer_text = _as_text([peer.industry, peer.business_summary]).lower()
+
+    if any(x in target_text for x in ["advertising", "social", "family of apps", "digital"]):
+        if any(x in peer_text for x in ["advertising", "social", "search", "video", "streaming", "digital"]):
+            score += 45
+            reasons.append("digital advertising/platform exposure")
+        if peer.ticker.upper() in {"GOOGL", "SNAP", "PINS", "RDDT", "TTD", "AMZN"}:
+            score += 30
+            reasons.append("explicit internet advertising peer")
+
+    if any(x in target_text for x in ["semiconductor", "gpu", "graphics", "data center", "accelerated"]):
+        if any(x in peer_text for x in ["semiconductor", "chip", "silicon", "gpu", "data center", "foundry", "server"]):
+            score += 45
+            reasons.append("AI semiconductor / infrastructure exposure")
+        if peer.ticker.upper() in {"AMD", "AVGO", "TSM", "ASML", "MRVL", "QCOM", "ARM", "MU", "SMCI"}:
+            score += 30
+            reasons.append("explicit semiconductor / AI infrastructure peer")
 
     if target.industry != "Unknown" and peer.industry == target.industry:
         score += 55
@@ -135,13 +192,17 @@ def _score_peer(target: MarketSnapshot, peer: MarketSnapshot) -> tuple[float, li
         score += revenue_score
         reasons.append("similar revenue scale")
 
-    target_tokens = _tokens(target.business_summary + " " + target.industry)
-    peer_tokens = _tokens(peer.business_summary + " " + peer.industry)
+    target_tokens = _tokens([target.business_summary, target.industry])
+    peer_tokens = _tokens([peer.business_summary, peer.industry])
     if target_tokens and peer_tokens:
         overlap = len(target_tokens & peer_tokens) / max(len(target_tokens), 1)
         if overlap:
             score += min(overlap * 20, 10)
             reasons.append("business description overlap")
+
+    if peer.ticker.upper() in {"WMT", "COST", "TGT", "HD", "LOW", "TJX", "ROST"} and any(x in target_text for x in ["advertising", "social", "digital", "semiconductor", "gpu"]):
+        score -= 80
+        reasons.append("excluded/penalised: retail business model mismatch")
 
     if not peer.enterprise_value or not peer.ebitda:
         score -= 8
@@ -152,7 +213,7 @@ def _score_peer(target: MarketSnapshot, peer: MarketSnapshot) -> tuple[float, li
 
 def select_dynamic_peer_tickers(target: MarketSnapshot, user_peers: list[str] | None = None, min_peers: int = 4, max_peers: int = 5) -> list[str]:
     if user_peers:
-        return [p.upper().strip() for p in user_peers if p and p.upper().strip() != target.ticker.upper()][:max_peers]
+        return [str(p).upper().strip() for p in user_peers if p and str(p).upper().strip() != target.ticker.upper()][:max_peers]
 
     candidates = _candidate_shortlist(target)
     scored: list[tuple[float, str, list[str]]] = []
