@@ -1,13 +1,8 @@
 """Formula-driven Excel model exporter.
 
-This workbook is deliberately generated from a fixed template, not by an LLM.
-It uses FMP statement history when available and falls back to yfinance fields.
-Key design goals:
-- five historical years;
-- ten forecast years in the Excel model;
-- separate income statement, balance sheet and cash flow sections on one tab;
-- DCF, football field and sensitivity tabs reference model cells;
-- no circular formulas.
+Uses structured statement history from FMP when available and falls back to
+available yfinance fields. The workbook is deliberately template-driven so the
+LLM cannot invent workbook formulas.
 """
 from __future__ import annotations
 
@@ -73,54 +68,53 @@ def _write(ws, row: int, values: list[Any]) -> None:
         ws.cell(row, col, value)
 
 
-def _historical_years(model: ValidatedFinancialModel, hist: HistoricalFinancials) -> list[str]:
-    years = sorted(hist.revenue.keys())[-5:]
-    return years or model.historical_years[-5:]
+def _hist_years(model: ValidatedFinancialModel, hist: HistoricalFinancials) -> list[str]:
+    return sorted(hist.revenue.keys())[-5:] or model.historical_years[-5:]
 
 
 def _forecast_years(model: ValidatedFinancialModel) -> list[str]:
-    if model.forecast_years:
+    try:
         first = model.forecast_years[0]
-        try:
-            start = 2000 + int(first.replace("FY", "").replace("E", ""))
-            return [f"FY{str(start + i)[-2:]}E" for i in range(FORECAST_YEARS_EXCEL)]
-        except Exception:
-            pass
-    return [f"FY{i}E" for i in range(1, FORECAST_YEARS_EXCEL + 1)]
+        start = 2000 + int(first.replace("FY", "").replace("E", ""))
+        return [f"FY{str(start + i)[-2:]}E" for i in range(FORECAST_YEARS_EXCEL)]
+    except Exception:
+        return [f"FY{i}E" for i in range(1, FORECAST_YEARS_EXCEL + 1)]
 
 
-def _get(d: dict[str, float], year: str) -> float | None:
-    return d.get(year)
+def _n(value: Any) -> float | None:
+    try:
+        if value in (None, ""):
+            return None
+        return float(value)
+    except Exception:
+        return None
 
 
-def _last_nonzero(values: dict[str, float], default: float) -> float:
-    for _, value in sorted(values.items(), reverse=True):
-        if value not in (None, 0):
-            return value
-    return default
+def _avg_positive(values: list[float | None], default: float) -> float:
+    clean = [v for v in values if v is not None and v > 0]
+    return sum(clean) / len(clean) if clean else default
 
 
-def _pct(ws, rows: list[int], cols: range) -> None:
-    for row in rows:
-        for col in cols:
-            ws.cell(row, col).number_format = PCT_FMT
+def _format_pct(ws, rows: list[int], cols: range) -> None:
+    for r in rows:
+        for c in cols:
+            ws.cell(r, c).number_format = PCT_FMT
 
 
-def _num(ws, rows: list[int], cols: range) -> None:
-    for row in rows:
-        for col in cols:
-            ws.cell(row, col).number_format = NUM_FMT
+def _format_num(ws, rows: list[int], cols: range) -> None:
+    for r in rows:
+        for c in cols:
+            ws.cell(r, c).number_format = NUM_FMT
 
 
 def _create_assumptions(wb: Workbook, report: FullReport, model: ValidatedFinancialModel) -> None:
     ws = wb.create_sheet("Assumptions")
     _style(ws)
     _title(ws, f"Assumptions and Validation - {model.ticker}", 16)
-    r = 3
-    r = _section(ws, r, "Scenario Selector and Target Bridge", 10)
+    r = _section(ws, 3, "Scenario Selector and Target Bridge", 10)
     _headers(ws, r, ["Item", "Value", "Comment"])
     rows = [
-        ["Selected Scenario", "Base", "Change to Bear/Base/Bull for scenario views."],
+        ["Selected Scenario", "Base", "For model readability; base case drives the current workbook."],
         ["Current Price", model.valuation_summary.get("current_price"), "Market data layer."],
         ["Intrinsic Base DCF", model.valuation_summary.get("intrinsic_dcf_base_target_price"), "Raw DCF value."],
         ["12M Base Target", model.valuation_summary.get("base_target_price"), "DCF-led 12-month target bridge."],
@@ -134,23 +128,20 @@ def _create_assumptions(wb: Workbook, report: FullReport, model: ValidatedFinanc
     ]
     for i, row in enumerate(rows, start=r + 1):
         _write(ws, i, row)
-    for row in [5, 6, 7, 8, 9, 10, 11]:
+    for row in range(6, 12):
         ws.cell(row, 2).number_format = PRICE_FMT
-    for row in [12, 13, 14]:
+    for row in range(12, 15):
         ws.cell(row, 2).number_format = PCT_FMT
 
-    r = 18
-    r = _section(ws, r, "Bear / Base / Bull Operating Assumptions", 16)
+    r = _section(ws, 18, "Bear / Base / Bull Operating Assumptions", 16)
     _headers(ws, r, ["Scenario", "Rev Growth Y1", "Y2", "Y3", "Y4", "Y5", "Terminal Fade Growth", "EBITDA Margin Y1", "Y5", "D&A % Rev", "Capex % Rev", "NWC % Rev", "Tax Rate", "WACC", "Terminal Growth"])
     for i, name in enumerate(SCENARIOS, start=r + 1):
         a = model.scenarios[name].assumptions
-        terminal_fade = a.terminal_growth
-        _write(ws, i, [name.title(), *a.revenue_growth[:5], terminal_fade, a.ebitda_margin[0], a.ebitda_margin[-1], a.da_percent_revenue, a.capex_percent_revenue, a.nwc_percent_revenue, a.tax_rate, a.wacc, a.terminal_growth])
+        _write(ws, i, [name.title(), *a.revenue_growth[:5], a.terminal_growth, a.ebitda_margin[0], a.ebitda_margin[-1], a.da_percent_revenue, a.capex_percent_revenue, a.nwc_percent_revenue, a.tax_rate, a.wacc, a.terminal_growth])
         for col in range(2, 16):
             ws.cell(i, col).number_format = PCT_FMT
 
-    r = 26
-    r = _section(ws, r, "Validation Messages", 12)
+    r = _section(ws, 26, "Validation Messages", 12)
     _headers(ws, r, ["Type", "Message"])
     current = r + 1
     for msg in model.validation.errors:
@@ -166,7 +157,7 @@ def _create_model(wb: Workbook, report: FullReport, model: ValidatedFinancialMod
     _style(ws)
     _title(ws, "Historical and Forecast Three-Statement Model", 18)
     hist = report.historicals
-    hist_years = _historical_years(model, hist)
+    hist_years = _hist_years(model, hist)
     forecast_years = _forecast_years(model)
     years = hist_years + forecast_years
     _headers(ws, 3, ["Metric"] + years)
@@ -205,41 +196,39 @@ def _create_model(wb: Workbook, report: FullReport, model: ValidatedFinancialMod
     for col, year in enumerate(hist_years, start=2):
         c = get_column_letter(col)
         for metric, data in maps.items():
-            ws.cell(rows[metric], col, _get(data, year))
+            ws.cell(rows[metric], col, data.get(year))
         if col > 2:
             ws.cell(rows["Revenue Growth"], col, f"={c}5/{get_column_letter(col-1)}5-1")
         ws.cell(rows["Gross Margin"], col, f"=IFERROR({c}7/{c}5,0)")
         ws.cell(rows["EBITDA Margin"], col, f"=IFERROR({c}9/{c}5,0)")
-        if not ws.cell(rows["D&A"], col).value and ws.cell(rows["EBITDA"], col).value and ws.cell(rows["EBIT"], col).value:
-            ws.cell(rows["D&A"], col, f"={c}9-{c}12")
+        if not ws.cell(rows["D&A"], col).value:
+            ws.cell(rows["D&A"], col, f"=MAX(0,{c}9-{c}12)")
         ws.cell(rows["FCF Margin"], col, f"=IFERROR({c}42/{c}5,0)")
         if not ws.cell(rows["Total Debt"], col).value:
             ws.cell(rows["Total Debt"], col, f"=N({c}30)+N({c}31)")
-        if not ws.cell(rows["Balance Check"], col).value:
-            ws.cell(rows["Balance Check"], col, f"=N({c}26)-N({c}34)-N({c}35)")
+        ws.cell(rows["Balance Check"], col, f"=N({c}26)-N({c}34)-N({c}35)")
 
-    base_row = 21  # Assumptions base case row: section at 18, header 19, bear 20, base 21, bull 22
+    base_row = 21
     last_hist_col = start_fcst_col - 1
-    for i, year in enumerate(forecast_years):
+    avg_start = get_column_letter(max(2, last_hist_col - 2))
+    avg_end = get_column_letter(last_hist_col)
+    for i, _ in enumerate(forecast_years):
         col = start_fcst_col + i
         c = get_column_letter(col); p = get_column_letter(col - 1)
-        if i < 5:
-            growth = f"Assumptions!{get_column_letter(2 + i)}${base_row}"
-        else:
-            growth = f"MAX(Assumptions!$G${base_row},Assumptions!$F${base_row}*0.75^{i-4})"
-        margin_formula = f"Assumptions!$H${base_row}+((Assumptions!$I${base_row}-Assumptions!$H${base_row})/4)*MIN({i},4)"
+        growth = f"Assumptions!{get_column_letter(2 + i)}${base_row}" if i < 5 else f"MAX(Assumptions!$G${base_row},Assumptions!$F${base_row}*0.75^{i-4})"
+        margin = f"Assumptions!$H${base_row}+((Assumptions!$I${base_row}-Assumptions!$H${base_row})/4)*MIN({i},4)"
         ws.cell(rows["Revenue"], col, f"={p}5*(1+{growth})")
         ws.cell(rows["Revenue Growth"], col, f"={c}5/{p}5-1")
-        ws.cell(rows["Gross Profit"], col, f"={c}5*AVERAGE({get_column_letter(max(2,last_hist_col-2))}8:{get_column_letter(last_hist_col)}8)")
+        ws.cell(rows["Gross Profit"], col, f"={c}5*AVERAGE({avg_start}8:{avg_end}8)")
         ws.cell(rows["Gross Margin"], col, f"={c}7/{c}5")
-        ws.cell(rows["EBITDA"], col, f"={c}5*({margin_formula})")
+        ws.cell(rows["EBITDA"], col, f"={c}5*({margin})")
         ws.cell(rows["EBITDA Margin"], col, f"={c}9/{c}5")
         ws.cell(rows["D&A"], col, f"={c}5*Assumptions!$J${base_row}")
         ws.cell(rows["EBIT"], col, f"={c}9-{c}11")
         ws.cell(rows["Tax"], col, f"=MAX({c}12,0)*Assumptions!$M${base_row}")
         ws.cell(rows["Net Income / NOPAT"], col, f"={c}12-{c}13")
-        ws.cell(rows["Receivables"], col, f"={c}5*AVERAGE({get_column_letter(max(2,last_hist_col-2))}20:{get_column_letter(last_hist_col)}20)/AVERAGE({get_column_letter(max(2,last_hist_col-2))}5:{get_column_letter(last_hist_col)}5)")
-        ws.cell(rows["Inventory"], col, f"={c}5*AVERAGE({get_column_letter(max(2,last_hist_col-2))}21:{get_column_letter(last_hist_col)}21)/AVERAGE({get_column_letter(max(2,last_hist_col-2))}5:{get_column_letter(last_hist_col)}5)")
+        ws.cell(rows["Receivables"], col, f"={c}5*IFERROR(AVERAGE({avg_start}20:{avg_end}20)/AVERAGE({avg_start}5:{avg_end}5),0)")
+        ws.cell(rows["Inventory"], col, f"={c}5*IFERROR(AVERAGE({avg_start}21:{avg_end}21)/AVERAGE({avg_start}5:{avg_end}5),0)")
         ws.cell(rows["Cash & Equivalents"], col, f"={p}18+{c}42")
         ws.cell(rows["Short-term Investments"], col, f"={p}19")
         ws.cell(rows["Total Current Assets"], col, f"=SUM({c}18:{c}21)")
@@ -247,12 +236,11 @@ def _create_model(wb: Workbook, report: FullReport, model: ValidatedFinancialMod
         ws.cell(rows["Goodwill"], col, f"={p}24")
         ws.cell(rows["Intangibles"], col, f"={p}25")
         ws.cell(rows["Total Assets"], col, f"={c}22+{c}23+{c}24+{c}25")
-        ws.cell(rows["Accounts Payable"], col, f"={c}5*AVERAGE({get_column_letter(max(2,last_hist_col-2))}29:{get_column_letter(last_hist_col)}29)/AVERAGE({get_column_letter(max(2,last_hist_col-2))}5:{get_column_letter(last_hist_col)}5)")
+        ws.cell(rows["Accounts Payable"], col, f"={c}5*IFERROR(AVERAGE({avg_start}29:{avg_end}29)/AVERAGE({avg_start}5:{avg_end}5),0)")
         ws.cell(rows["Short-term Debt"], col, f"={p}30")
         ws.cell(rows["Long-term Debt"], col, f"={p}31")
         ws.cell(rows["Total Debt"], col, f"={c}30+{c}31")
         ws.cell(rows["Total Current Liabilities"], col, f"={c}29+{c}30")
-        ws.cell(rows["Total Liabilities"], col, f"={c}34")
         ws.cell(rows["Total Liabilities"], col, f"={c}33+{c}31")
         ws.cell(rows["Shareholders' Equity"], col, f"={c}26-{c}34")
         ws.cell(rows["Balance Check"], col, f"={c}26-{c}34-{c}35")
@@ -260,14 +248,14 @@ def _create_model(wb: Workbook, report: FullReport, model: ValidatedFinancialMod
         ws.cell(rows["Capex"], col, f"={c}5*Assumptions!$K${base_row}")
         ws.cell(rows["Free Cash Flow"], col, f"={c}40-{c}41")
         ws.cell(rows["FCF Margin"], col, f"={c}42/{c}5")
-        ws.cell(rows["Stock-based Compensation"], col, f"={c}5*AVERAGE({get_column_letter(max(2,last_hist_col-2))}44:{get_column_letter(last_hist_col)}44)/AVERAGE({get_column_letter(max(2,last_hist_col-2))}5:{get_column_letter(last_hist_col)}5)")
+        ws.cell(rows["Stock-based Compensation"], col, f"={c}5*IFERROR(AVERAGE({avg_start}44:{avg_end}44)/AVERAGE({avg_start}5:{avg_end}5),0)")
         ws.cell(rows["Dividends Paid"], col, f"={p}45")
         ws.cell(rows["Share Repurchases"], col, f"={p}46")
         ws.cell(rows["Shares Outstanding"], col, f"=IFERROR({p}47*(1-({c}46/MAX({c}14,1))*0.01),{p}47)")
 
     used_cols = range(2, 2 + len(years))
-    _pct(ws, [6, 8, 10, 43], used_cols)
-    _num(ws, [r for r in rows.values() if r not in {6, 8, 10, 43}], used_cols)
+    _format_pct(ws, [6, 8, 10, 43], used_cols)
+    _format_num(ws, [r for r in rows.values() if r not in {6, 8, 10, 43}], used_cols)
 
 
 def _create_wacc(wb: Workbook, model: ValidatedFinancialModel) -> None:
@@ -278,7 +266,8 @@ def _create_wacc(wb: Workbook, model: ValidatedFinancialModel) -> None:
     for row, name in enumerate(SCENARIOS, start=4):
         a = model.scenarios[name].assumptions
         _write(ws, row, [name.title(), a.wacc, a.terminal_growth, f"=B{row}-C{row}", f"=IF(D{row}>0.005,\"OK\",\"Review\")"])
-        for col in [2, 3, 4]: ws.cell(row, col).number_format = PCT_FMT
+        for col in [2, 3, 4]:
+            ws.cell(row, col).number_format = PCT_FMT
 
 
 def _create_dcf(wb: Workbook, report: FullReport, model: ValidatedFinancialModel) -> None:
@@ -287,14 +276,16 @@ def _create_dcf(wb: Workbook, report: FullReport, model: ValidatedFinancialModel
     _title(ws, "Formula-Linked 10-Year DCF", 16)
     fyears = _forecast_years(model)
     _headers(ws, 3, ["Metric"] + fyears + ["Terminal", "Total"])
-    hist_count = len(_historical_years(model, report.historicals))
+    hist_count = len(_hist_years(model, report.historicals))
     start_col = 2
     terminal_col = start_col + len(fyears)
     total_col = terminal_col + 1
     rows = {"FCF": 5, "Discount Period": 6, "Discount Factor": 7, "PV FCF": 8, "Terminal Value": 10, "PV Terminal Value": 11, "Enterprise Value": 13, "Net Debt": 14, "Equity Value": 15, "Shares": 16, "Intrinsic DCF / Share": 17, "12M Target Price": 18, "Current Price": 19, "Upside / Downside": 20}
-    for name, row in rows.items(): ws.cell(row,1,name)
+    for name, row in rows.items():
+        ws.cell(row, 1, name)
     for i in range(len(fyears)):
-        col = start_col + i; c = get_column_letter(col)
+        col = start_col + i
+        c = get_column_letter(col)
         model_col = get_column_letter(2 + hist_count + i)
         ws.cell(rows["FCF"], col, f"='3 Statement Model'!{model_col}42")
         ws.cell(rows["Discount Period"], col, i + 1)
@@ -310,11 +301,12 @@ def _create_dcf(wb: Workbook, report: FullReport, model: ValidatedFinancialModel
     ws.cell(rows["Equity Value"], total_col, f"={total}13-{total}14")
     ws.cell(rows["Shares"], total_col, model.scenarios["base"].dcf.shares_outstanding)
     ws.cell(rows["Intrinsic DCF / Share"], total_col, f"={total}15/{total}16")
-    ws.cell(rows["12M Target Price"], total_col, "=Assumptions!B6")
-    ws.cell(rows["Current Price"], total_col, "=Assumptions!B5")
+    ws.cell(rows["12M Target Price"], total_col, "=Assumptions!B8")
+    ws.cell(rows["Current Price"], total_col, "=Assumptions!B6")
     ws.cell(rows["Upside / Downside"], total_col, f"={total}18/{total}19-1")
-    _num(ws, [5, 8, 10, 11, 13, 14, 15, 16], range(2, total_col + 1))
-    for row in [17, 18, 19]: ws.cell(row, total_col).number_format = PRICE_FMT
+    _format_num(ws, [5, 8, 10, 11, 13, 14, 15, 16], range(2, total_col + 1))
+    for row in [17, 18, 19]:
+        ws.cell(row, total_col).number_format = PRICE_FMT
     ws.cell(rows["Upside / Downside"], total_col).number_format = PCT_FMT
 
 
@@ -325,22 +317,23 @@ def _create_comps(wb: Workbook, report: FullReport) -> None:
     _headers(ws, 3, ["Company", "Ticker", "Market Cap", "EV", "Revenue", "EBITDA", "EV/Revenue", "EV/EBITDA", "Forward P/E"])
     peers = report.peer_comps.get("peer_table", []) if report.peer_comps else []
     for row, peer in enumerate(peers[:8], start=4):
-        ev = peer.get("enterprise_value"); rev = peer.get("revenue_ttm"); ebitda = peer.get("ebitda")
-        _write(ws, row, [peer.get("company_name"), peer.get("ticker"), peer.get("market_cap"), ev, rev, ebitda, f"=IFERROR(D{row}/E{row},\"n.a.\")", f"=IFERROR(D{row}/F{row},\"n.a.\")", peer.get("forward_pe")])
-    _num(ws, list(range(4, 12)), range(3, 7))
+        _write(ws, row, [peer.get("company_name"), peer.get("ticker"), peer.get("market_cap"), peer.get("enterprise_value"), peer.get("revenue_ttm"), peer.get("ebitda"), f"=IFERROR(D{row}/E{row},\"n.a.\")", f"=IFERROR(D{row}/F{row},\"n.a.\")", peer.get("forward_pe")])
+    _format_num(ws, list(range(4, 12)), range(3, 7))
     for row in range(4, 12):
-        for col in [7, 8, 9]: ws.cell(row, col).number_format = MULT_FMT
+        for col in [7, 8, 9]:
+            ws.cell(row, col).number_format = MULT_FMT
 
 
-def _create_football_field(wb: Workbook, model: ValidatedFinancialModel) -> None:
+def _create_football_field(wb: Workbook) -> None:
     ws = wb.create_sheet("Football Field")
     _style(ws)
     _title(ws, "Valuation Range", 10)
     _headers(ws, 3, ["Method", "Low", "Base", "High", "Comment"])
-    _write(ws, 4, ["12M DCF-led Target Bridge", "=Assumptions!B8", "=Assumptions!B6", "=Assumptions!B9", "Report target-price range."])
+    _write(ws, 4, ["12M DCF-led Target Bridge", "=Assumptions!B9", "=Assumptions!B8", "=Assumptions!B10", "Report target-price range."])
     _write(ws, 5, ["Intrinsic DCF", "=DCF!M17", "=DCF!M17", "=DCF!M17", "Formula-linked intrinsic DCF output."])
     for row in [4, 5]:
-        for col in [2, 3, 4]: ws.cell(row, col).number_format = PRICE_FMT
+        for col in [2, 3, 4]:
+            ws.cell(row, col).number_format = PRICE_FMT
     chart = BarChart(); chart.type = "bar"; chart.title = "Valuation Range"; chart.height = 7; chart.width = 14
     chart.add_data(ws["B3:D5"], titles_from_data=True); chart.set_categories(ws["A4:A5"]); ws.add_chart(chart, "G3")
 
@@ -378,7 +371,8 @@ def _create_audit(wb: Workbook, report: FullReport, model: ValidatedFinancialMod
         ["Workbook linkage", "Formula-driven", "DCF and sensitivity reference 3 Statement Model, WACC and Assumptions."],
         ["Validation status", model.validation.is_valid, "Report generation stops when model is invalid."],
     ]
-    for i, row in enumerate(rows, start=4): _write(ws, i, row)
+    for i, row in enumerate(rows, start=4):
+        _write(ws, i, row)
 
 
 def export_excel_model(report: FullReport, output_dir: Path) -> str:
@@ -392,7 +386,7 @@ def export_excel_model(report: FullReport, output_dir: Path) -> str:
     _create_wacc(wb, model)
     _create_dcf(wb, report, model)
     _create_comps(wb, report)
-    _create_football_field(wb, model)
+    _create_football_field(wb)
     _create_sensitivity(wb, model)
     _create_audit(wb, report, model)
     for ws in wb.worksheets:
