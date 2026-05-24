@@ -1,15 +1,18 @@
 """FastAPI entry point for the equity research report generator."""
 from __future__ import annotations
 
+import json
 import os
+import queue
 import sys
+import threading
 from pathlib import Path
 
 # Allow `python3 src/main.py` from repo root.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 import uvicorn
 
@@ -28,19 +31,7 @@ OUTPUTS_DIR.mkdir(exist_ok=True)
 app.mount("/outputs", StaticFiles(directory="outputs"), name="outputs")
 
 
-@app.get("/", response_class=HTMLResponse)
-def serve_ui() -> HTMLResponse:
-    ui_path = Path(__file__).parent / "ui" / "index.html"
-    return HTMLResponse(ui_path.read_text(encoding="utf-8"))
-
-
-@app.post("/report/initiation")
-def create_initiation_report(request: ReportRequest):
-    try:
-        report = generate_report(request)
-    except Exception as exc:  # pragma: no cover - surfaced to localhost user
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
+def _report_response(report):
     report_url = f"/{report.html_path}" if report.html_path else None
     model_url = f"/{report.excel_model_path}" if report.excel_model_path else None
     return {
@@ -54,6 +45,55 @@ def create_initiation_report(request: ReportRequest):
         "excel_model_path": report.excel_model_path,
         "excel_model_url": model_url,
     }
+
+
+@app.get("/", response_class=HTMLResponse)
+def serve_ui() -> HTMLResponse:
+    ui_path = Path(__file__).parent / "ui" / "index.html"
+    return HTMLResponse(ui_path.read_text(encoding="utf-8"))
+
+
+@app.post("/report/initiation")
+def create_initiation_report(request: ReportRequest):
+    try:
+        report = generate_report(request)
+    except Exception as exc:  # pragma: no cover - surfaced to localhost user
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return _report_response(report)
+
+
+@app.post("/report/stream")
+def stream_report(request: ReportRequest):
+    """Stream agent progress events while generating the report.
+
+    This uses server-sent events. The actual workflow remains synchronous, but it
+    runs in a worker thread and pushes structured agent events into a queue for
+    the UI to render live.
+    """
+    event_queue: queue.Queue[dict] = queue.Queue()
+
+    def emit(event: dict):
+        event_queue.put({"type": "agent", **event})
+
+    def worker():
+        try:
+            report = generate_report(request, progress_callback=emit)
+            event_queue.put({"type": "result", **_report_response(report)})
+        except Exception as exc:
+            event_queue.put({"type": "error", "detail": str(exc)})
+        finally:
+            event_queue.put({"type": "done"})
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    def event_stream():
+        while True:
+            event = event_queue.get()
+            yield f"data: {json.dumps(event, default=str)}\n\n"
+            if event.get("type") == "done":
+                break
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 @app.post("/model/excel")
