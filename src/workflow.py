@@ -1,9 +1,16 @@
-"""Main report-generation workflow."""
+"""Main report-generation workflow.
+
+The workflow is now model-first:
+1. collect market and financial data;
+2. build and validate a bear/base/bull DCF financial model;
+3. stop if the model is invalid;
+4. generate Excel from the validated model;
+5. generate the written report from the validated model outputs.
+"""
 from __future__ import annotations
 
 from pathlib import Path
 
-from src.agents.assumption_derivation_agent import assumptions_to_scenario_assumptions, derive_dynamic_assumptions
 from src.agents.company_classifier_agent import classify_company
 from src.agents.evidence_agent import build_company_evidence_pack
 from src.agents.financial_model_planner_agent import build_financial_model_plan
@@ -32,12 +39,11 @@ from src.data.yfinance_client import (
 )
 from src.engines.chart_engine import chart_forecast_revenue, chart_margin_forecast, chart_price_technicals
 from src.engines.comps_engine import run_comps
-from src.engines.dcf_engine import run_dcf
 from src.engines.dynamic_valuation_engine import run_dynamic_valuation
-from src.engines.forecast_engine import build_default_assumptions, run_forecast
+from src.engines.model_validation_engine import build_validated_financial_model, raise_if_model_invalid
 from src.engines.sensitivity_engine import growth_margin_sensitivity, wacc_terminal_growth_sensitivity
 from src.engines.technical_engine import run_technical_analysis
-from src.report.repaired_simplified_excel_exporter import export_excel_model
+from src.report.validated_model_excel_exporter import export_excel_model
 from src.report.renderer import render_report
 from src.schemas import CompanyEvidencePack, DynamicValuationResult, FullReport, LLMCommitteeOutput, ReportRequest, SectionOutput
 
@@ -104,7 +110,7 @@ def _dynamic_valuation_section(dynamic: DynamicValuationResult) -> SectionOutput
             outputs.append({"method": method, "output": str(output)[:1200]})
 
     return SectionOutput(
-        title="12-month DCF-led valuation output",
+        title="Validated 12-month DCF-led valuation output",
         narrative=dynamic.investment_thesis,
         bullets=[
             f"Primary valuation method: {dynamic.primary_method}",
@@ -118,6 +124,35 @@ def _dynamic_valuation_section(dynamic: DynamicValuationResult) -> SectionOutput
             *[f"Sanity check: {x}" for x in dynamic.sanity_checks[:6]],
         ],
         tables=[{"name": "Valuation workings summary", "rows": outputs}],
+    )
+
+
+def _financial_model_validation_section(validated_model) -> SectionOutput:
+    summary = validated_model.valuation_summary
+    check_rows = [
+        {"check": key, "passed": value}
+        for key, value in validated_model.validation.checks.items()
+    ]
+    message_rows = (
+        [{"type": "error", "message": msg} for msg in validated_model.validation.errors]
+        + [{"type": "warning", "message": msg} for msg in validated_model.validation.warnings]
+    )
+    return SectionOutput(
+        title="Financial model validation gate",
+        narrative=(
+            "The report is generated only after the financial model passes validation. The validated model creates the bear, base and bull DCF target prices before the report narrative is written."
+        ),
+        bullets=[
+            f"Model valid: {validated_model.validation.is_valid}",
+            f"Historical years available: {validated_model.data_quality.historical_years_available}/5",
+            f"Bear target: {summary.get('bear_target_price'):,.2f}" if summary.get("bear_target_price") else "Bear target: n/a",
+            f"Base target: {summary.get('base_target_price'):,.2f}" if summary.get("base_target_price") else "Base target: n/a",
+            f"Bull target: {summary.get('bull_target_price'):,.2f}" if summary.get("bull_target_price") else "Bull target: n/a",
+        ],
+        tables=[
+            {"name": "Validation checks", "rows": check_rows},
+            {"name": "Validation messages", "rows": message_rows},
+        ],
     )
 
 
@@ -141,16 +176,15 @@ def _financial_model_plan_section(model_plan) -> SectionOutput:
         for driver in model_plan.forecast_drivers
     ]
     return SectionOutput(
-        title="Foundational financial model plan",
+        title="Model-first workflow architecture",
         narrative=(
-            "The Excel model has been simplified to seven core sheets: Assumptions, 3 Statement Model, WACC, DCF, Comps Analysis, Football Field and Sensitivity Analysis. "
-            "The selected scenario in the Assumptions sheet drives the forecast model and valuation outputs."
+            "The workflow now builds and validates the financial model before writing the report. Excel is an interpretable output layer. The Python validation engine is the source of truth for forecast math and bear/base/bull DCF target prices."
         ),
         bullets=[
             f"Model type: {model_plan.model_type}",
-            "Excel scope: simplified seven-tab model",
-            "Scenario selector: Bear / Base / Bull in the Assumptions tab",
-            "Forecast horizon: five historical years and up to eight forecast years",
+            "Report generation is blocked if the financial model validation gate fails",
+            "Forecast horizon: five historical years where available and five forecast years",
+            "Valuation output: validated bear/base/bull DCF target prices",
         ],
         tables=[
             {"name": "Recommended workbook architecture", "rows": tab_rows},
@@ -164,8 +198,7 @@ def _company_evidence_section(evidence: CompanyEvidencePack) -> SectionOutput:
     return SectionOutput(
         title="Company-specific source evidence",
         narrative=(
-            "This section shows the source evidence available to support the model assumptions. "
-            "The Excel model itself has been kept deliberately simple and does not add separate evidence or sector-engine tabs."
+            "This section shows the source evidence available to support the model assumptions. The current data layer uses yfinance; for greater reliability the next data upgrade should add SEC company facts, Financial Modeling Prep, FactSet, CapIQ or another audited fundamentals feed."
         ),
         bullets=[
             f"Evidence items collected: {len(evidence.evidence_items)}",
@@ -192,10 +225,35 @@ def generate_report(request: ReportRequest) -> FullReport:
     )
 
     historicals = fetch_historical_financials(snapshot.ticker)
+
+    # MODEL-FIRST VALIDATION GATE
+    validated_model = build_validated_financial_model(snapshot, historicals)
+    raise_if_model_invalid(validated_model)
+
+    # Use the validated model as the report source of truth.
+    assumptions = {
+        "bear": validated_model.scenarios["bear"].assumptions,
+        "base": validated_model.scenarios["base"].assumptions,
+        "bull": validated_model.scenarios["bull"].assumptions,
+    }
+    forecasts = {
+        "bear": validated_model.scenarios["bear"].forecasts,
+        "base": validated_model.scenarios["base"].forecasts,
+        "bull": validated_model.scenarios["bull"].forecasts,
+    }
+    dcfs = {
+        "bear": validated_model.scenarios["bear"].dcf,
+        "base": validated_model.scenarios["base"].dcf,
+        "bull": validated_model.scenarios["bull"].dcf,
+    }
+
     price_history = fetch_price_history(snapshot.ticker)
     technicals = run_technical_analysis(price_history)
 
     company_classification = classify_company(snapshot, historicals)
+    # Keep these agents for planning/evidence, but they no longer override the validated model.
+    dynamic_assumptions = None
+    from src.agents.assumption_derivation_agent import derive_dynamic_assumptions
     dynamic_assumptions = derive_dynamic_assumptions(snapshot, historicals, company_classification)
     financial_model_plan = build_financial_model_plan(snapshot, historicals, company_classification, dynamic_assumptions)
     company_evidence = build_company_evidence_pack(
@@ -207,30 +265,11 @@ def generate_report(request: ReportRequest) -> FullReport:
         source_urls=request.source_urls,
     )
 
-    assumptions = build_default_assumptions(historicals)
-    assumptions["base"] = assumptions_to_scenario_assumptions(assumptions["base"], dynamic_assumptions)
-    assumptions["bear"].wacc = assumptions["base"].wacc + 0.01
-    assumptions["bull"].wacc = max(assumptions["base"].wacc - 0.005, 0.06)
-    assumptions["bear"].tax_rate = assumptions["base"].tax_rate
-    assumptions["bull"].tax_rate = assumptions["base"].tax_rate
-    if dynamic_assumptions.terminal_growth is not None:
-        assumptions["bear"].terminal_growth = max(dynamic_assumptions.terminal_growth - 0.005, 0.0)
-        assumptions["bull"].terminal_growth = dynamic_assumptions.terminal_growth + 0.005
-
-    forecasts = {scenario: run_forecast(historicals, assumption) for scenario, assumption in assumptions.items()}
-
-    net_debt = snapshot.net_debt or 0.0
-    shares = snapshot.shares_outstanding
-    dcfs = {
-        scenario: run_dcf(scenario, forecasts[scenario], assumptions[scenario], net_debt, shares)
-        for scenario in ["bear", "base", "bull"]
-    }
-
     peers = select_dynamic_peer_tickers(snapshot, request.peers, min_peers=4, max_peers=5)
     peer_snapshots = fetch_peer_snapshot(peers) if peers else []
-    company_ebitda = snapshot.ebitda
-    if not company_ebitda and forecasts.get("base"):
-        company_ebitda = forecasts["base"][0].ebitda
+    company_ebitda = snapshot.ebitda or forecasts["base"][0].ebitda
+    net_debt = snapshot.net_debt or 0.0
+    shares = snapshot.shares_outstanding
     comps = run_comps(peer_snapshots, company_ebitda, net_debt, shares)
     comps["selected_peer_tickers"] = peers
 
@@ -244,9 +283,12 @@ def generate_report(request: ReportRequest) -> FullReport:
         dynamic_assumptions=dynamic_assumptions,
     )
 
-    target_price = dynamic_valuation.target_price
-    recommendation = dynamic_valuation.recommendation
-    upside = dynamic_valuation.upside_downside
+    target_price = validated_model.valuation_summary.get("base_target_price")
+    recommendation, upside = _recommendation(snapshot.current_price, target_price)
+    dynamic_valuation.target_price = target_price
+    dynamic_valuation.recommendation = recommendation
+    dynamic_valuation.upside_downside = upside
+    dynamic_valuation.valuation_outputs["validated_model"] = validated_model.model_dump()
 
     llm_committee = run_llm_committee_sync(
         snapshot,
@@ -259,10 +301,8 @@ def generate_report(request: ReportRequest) -> FullReport:
         dynamic_valuation,
     )
     if llm_committee.enabled and llm_committee.final_recommendation:
+        # LLM can influence narrative, but the validated model remains the price source of truth.
         recommendation = llm_committee.final_recommendation
-        if llm_committee.final_target_price:
-            target_price = llm_committee.final_target_price
-            _, upside = _recommendation(snapshot.current_price, target_price)
 
     sensitivities = [
         wacc_terminal_growth_sensitivity(forecasts["base"], assumptions["base"], net_debt, shares),
@@ -272,21 +312,21 @@ def generate_report(request: ReportRequest) -> FullReport:
     sections: list[SectionOutput] = [
         front_page_agent(snapshot, recommendation, target_price, upside),
         executive_summary_agent(snapshot, dcfs["base"], recommendation),
+        _financial_model_validation_section(validated_model),
         _financial_model_plan_section(financial_model_plan),
         _company_evidence_section(company_evidence),
         _dynamic_valuation_section(dynamic_valuation),
         _llm_committee_section(llm_committee),
         SectionOutput(
-            title="The long view and 12-month risk/reward",
+            title="Validated 12-month risk/reward",
             narrative=(
-                "The valuation is framed as a 12-month DCF-led target price. The simplified Excel model now focuses only on the core forecast, WACC, DCF, comps, football field and sensitivity analysis. "
-                "The Assumptions tab contains a Bear/Base/Bull selector that flows through the model."
+                "The report is now underpinned by a validated financial model. Bear, base and bull target prices are derived first through the Python DCF validation engine, then streamed into Excel and the written report."
             ),
             bullets=[
-                f"Bear DCF valuation: {dcfs['bear'].target_price:,.2f}" if dcfs["bear"].target_price else "Bear DCF valuation: n/a",
-                f"Base DCF valuation: {dcfs['base'].target_price:,.2f}" if dcfs["base"].target_price else "Base DCF valuation: n/a",
-                f"Bull DCF valuation: {dcfs['bull'].target_price:,.2f}" if dcfs["bull"].target_price else "Bull DCF valuation: n/a",
-                "DCF carries an 80% weighting in the final target price; dynamic peer comps and other valuation references are secondary checks.",
+                f"Bear DCF valuation: {validated_model.valuation_summary.get('bear_target_price'):,.2f}" if validated_model.valuation_summary.get("bear_target_price") else "Bear DCF valuation: n/a",
+                f"Base DCF valuation: {validated_model.valuation_summary.get('base_target_price'):,.2f}" if validated_model.valuation_summary.get("base_target_price") else "Base DCF valuation: n/a",
+                f"Bull DCF valuation: {validated_model.valuation_summary.get('bull_target_price'):,.2f}" if validated_model.valuation_summary.get("bull_target_price") else "Bull DCF valuation: n/a",
+                "The validated base DCF is the report target price. Dynamic peer comps are shown as a secondary context check, not the source of the final price.",
                 f"Dynamic peer set: {', '.join(peers) if peers else 'n/a'}",
             ],
         ),
@@ -313,7 +353,7 @@ def generate_report(request: ReportRequest) -> FullReport:
         sensitivities=sensitivities,
         sections=sections,
         recommendation=recommendation,
-        target_price=target_price,
+        target_price=target_price,  # type: ignore[arg-type]
         upside_downside=upside,
         company_classification=company_classification,
         dynamic_assumptions=dynamic_assumptions,
@@ -321,6 +361,7 @@ def generate_report(request: ReportRequest) -> FullReport:
         company_evidence=company_evidence,
         peer_comps=comps,
         dynamic_valuation=dynamic_valuation,
+        validated_model=validated_model,
         llm_committee=llm_committee,
     )
 
@@ -334,7 +375,6 @@ def generate_report(request: ReportRequest) -> FullReport:
         chart_price_technicals(price_history, chart_dir, snapshot.ticker),
     ]
     chart_paths = [p for p in chart_paths if p]
-    html_path = render_report(report, report_dir, chart_paths=chart_paths)
-    report.html_path = html_path
+    report.html_path = render_report(report, report_dir, chart_paths=chart_paths)
     report.excel_model_path = export_excel_model(report, model_dir)
     return report
