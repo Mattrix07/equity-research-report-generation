@@ -44,6 +44,7 @@ from src.engines.chart_engine import chart_forecast_revenue, chart_margin_foreca
 from src.engines.comps_engine import run_comps
 from src.engines.dynamic_valuation_engine import run_dynamic_valuation
 from src.engines.iterative_model_validation_engine import build_model_with_assumptions, raise_if_model_invalid
+from src.engines.price_target_bridge_v2 import apply_price_target_bridge
 from src.engines.sensitivity_engine import growth_margin_sensitivity, wacc_terminal_growth_sensitivity
 from src.engines.technical_engine import run_technical_analysis
 from src.report.renderer import render_report
@@ -83,15 +84,15 @@ def _validation_section(model) -> SectionOutput:
     return SectionOutput(
         title="Financial model validation gate",
         narrative=(
-            "The report is generated only after the model passes validation. The final bear, base and bull targets are calculated by Python from the LLM-assisted, bounded assumption set."
+            "The report is generated only after the model passes validation. The model now separates intrinsic DCF value from the DCF-led 12-month target bridge."
         ),
         bullets=[
             f"Model valid: {model.validation.is_valid}",
             f"Iteration count: {model.iteration_count}",
             f"Historical years available: {model.data_quality.historical_years_available}/5",
-            f"Bear target: {summary.get('bear_target_price'):,.2f}" if summary.get("bear_target_price") else "Bear target: n/a",
-            f"Base target: {summary.get('base_target_price'):,.2f}" if summary.get("base_target_price") else "Base target: n/a",
-            f"Bull target: {summary.get('bull_target_price'):,.2f}" if summary.get("bull_target_price") else "Bull target: n/a",
+            f"Intrinsic base DCF: {summary.get('intrinsic_dcf_base_target_price'):,.2f}" if summary.get("intrinsic_dcf_base_target_price") else "Intrinsic base DCF: n/a",
+            f"12-month base target: {summary.get('base_target_price'):,.2f}" if summary.get("base_target_price") else "12-month base target: n/a",
+            f"Analyst consensus anchor: {summary.get('analyst_consensus_target'):,.2f}" if summary.get("analyst_consensus_target") else "Analyst consensus anchor: n/a",
         ],
         tables=[
             {"name": "Validation checks", "rows": [{"check": k, "passed": v} for k, v in model.validation.checks.items()]},
@@ -112,7 +113,7 @@ def _llm_model_section(model, llm_pack, peer_selection) -> SectionOutput:
     return SectionOutput(
         title="LLM-assisted model agents",
         narrative=(
-            "LLM agents propose peers, forecast assumptions, WACC and terminal value. Python performs the valuation calculations and the validation gate decides whether outputs can be used."
+            "LLM agents propose peers, forecast assumptions, WACC and terminal value. Python performs valuation calculations and the validation gate decides whether outputs can be used."
         ),
         bullets=[
             f"LLM assumption agents enabled: {bool(llm_pack and llm_pack.enabled)}",
@@ -140,6 +141,18 @@ def _llm_committee_section(llm_committee: LLMCommitteeOutput) -> SectionOutput:
     )
 
 
+def _internet_platform_candidates(snapshot) -> list[str] | None:
+    text = f"{snapshot.ticker} {snapshot.sector} {snapshot.industry} {snapshot.business_summary}".lower()
+    if snapshot.ticker.upper() in {"META", "GOOGL", "SNAP", "PINS", "RDDT", "TTD"} or any(term in text for term in ["advertising", "social", "family of apps", "internet content", "digital"]):
+        return ["GOOGL", "SNAP", "PINS", "RDDT", "TTD", "NFLX", "SPOT", "ROKU", "AMZN", "MSFT", "TCEHY", "BIDU"]
+    return None
+
+
+def _apply_bridge(model, snapshot):
+    model = apply_price_target_bridge(model, snapshot)
+    return model
+
+
 def generate_report(request: ReportRequest, progress_callback: ProgressCallback | None = None) -> FullReport:
     _emit(progress_callback, agent="Manager", status="running", phase="planning", message="Planning model-first iterative research workflow.", reasoning_steps=["Confirm ticker and report type.", "Run financial model before report writing.", "Use LLMs for peer and assumption judgement; Python remains calculation engine."])
     snapshot = fetch_market_snapshot(request.ticker, request.company_name)
@@ -150,16 +163,16 @@ def generate_report(request: ReportRequest, progress_callback: ProgressCallback 
     plan = build_report_plan(snapshot.ticker, snapshot.company_name, request.report_type, snapshot.sector)
     _emit(progress_callback, agent="Manager", status="complete", phase="planning", message=f"Plan created for {snapshot.ticker}.", payload={"ticker": snapshot.ticker, "report_type": request.report_type})
 
-    _emit(progress_callback, agent="Financial Data Agent", status="running", phase="data_collection", mode="parallel-ready", group="Data", message="Fetching financial statements and market data.")
+    _emit(progress_callback, agent="Financial Data Agent", status="running", phase="data_collection", mode="parallel-ready", group="Data", message="Fetching financial statements and market data, including yfinance analyst target fields where available.")
     historicals = fetch_historical_financials(snapshot.ticker)
     _emit(progress_callback, agent="Financial Data Agent", status="complete", phase="data_collection", mode="parallel-ready", group="Data", message=f"Collected {len(historicals.revenue)} revenue years.")
 
-    _emit(progress_callback, agent="LLM Peer Selection Agent", status="running", phase="peer_selection", mode="sequential", message="Selecting comparable companies using LLM judgement and Python verification.", reasoning_steps=["Create a candidate shortlist from sector and business description.", "Ask LLM to select most relevant peers and explain exclusions.", "Verify selected tickers through market data before use."])
+    _emit(progress_callback, agent="LLM Peer Selection Agent", status="running", phase="peer_selection", mode="sequential", message="Selecting comparable companies using LLM judgement and Python verification.", reasoning_steps=["Create a candidate shortlist from sector and business description.", "Use an internet-platform shortlist for digital advertising/social media businesses.", "Ask LLM to select most relevant peers and explain exclusions.", "Verify selected tickers through market data before use."])
     if request.peers:
         peer_selection = None
         peers = [p.upper().strip() for p in request.peers if p.strip()][:5]
     else:
-        candidate_peers = _candidate_shortlist(snapshot, max_candidates=28)
+        candidate_peers = _internet_platform_candidates(snapshot) or _candidate_shortlist(snapshot, max_candidates=28)
         peer_selection = select_peers_with_llm_sync(snapshot, candidate_peers, max_peers=5)
         peers = peer_selection.selected_tickers[:5] if peer_selection and peer_selection.selected_tickers else []
         if not peers:
@@ -171,23 +184,22 @@ def generate_report(request: ReportRequest, progress_callback: ProgressCallback 
     llm_pack = run_llm_model_assumption_agents_sync(snapshot, historicals, peers=peers)
     _emit(progress_callback, agent="LLM Assumption Agents", status="complete", phase="assumption_derivation", mode="parallel", group="Parallel model agents", message="LLM model assumptions collected and bounded for Python calculation.", payload={"enabled": llm_pack.enabled, "warnings": llm_pack.warnings})
 
-    _emit(progress_callback, agent="Model Calculation Agent", status="running", phase="model_validation", message="Calculating bear/base/bull DCF using bounded assumptions.")
-    model = build_model_with_assumptions(snapshot, historicals, llm_inputs=llm_pack.model_inputs(), iteration_count=1)
+    _emit(progress_callback, agent="Model Calculation Agent", status="running", phase="model_validation", message="Calculating intrinsic DCF and DCF-led 12-month target bridge.")
+    model = _apply_bridge(build_model_with_assumptions(snapshot, historicals, llm_inputs=llm_pack.model_inputs(), iteration_count=1), snapshot)
 
     if not model.validation.is_valid:
         _emit(progress_callback, agent="Validation Agent", status="running", phase="model_validation", message="Initial model failed validation. Sending feedback to LLM revision agent for one controlled iteration.", payload={"errors": model.validation.errors, "warnings": model.validation.warnings})
         revision_pack = run_llm_model_assumption_agents_sync(snapshot, historicals, peers=peers, prior_model=model.model_dump(), validation_feedback=model.validation.model_dump())
-        # Merge original and revision outputs, giving revision agent priority where present.
         merged_inputs = llm_pack.model_inputs()
         if revision_pack.validation_revision:
             merged_inputs["validation_revision"] = revision_pack.validation_revision
-        model = build_model_with_assumptions(snapshot, historicals, llm_inputs=merged_inputs, iteration_count=2)
+        model = _apply_bridge(build_model_with_assumptions(snapshot, historicals, llm_inputs=merged_inputs, iteration_count=2), snapshot)
         if revision_pack.enabled:
             llm_pack.validation_revision = revision_pack.validation_revision
             llm_pack.warnings.extend(revision_pack.warnings)
 
     raise_if_model_invalid(model)
-    _emit(progress_callback, agent="Validation Agent", status="complete", phase="model_validation", message="Model passed validation. Final bear/base/bull DCF targets are approved for report generation.", payload=model.valuation_summary)
+    _emit(progress_callback, agent="Validation Agent", status="complete", phase="model_validation", message="Model passed validation. Intrinsic DCF and DCF-led 12-month target bridge are approved for report generation.", payload=model.valuation_summary)
 
     assumptions = {name: model.scenarios[name].assumptions for name in ["bear", "base", "bull"]}
     forecasts = {name: model.scenarios[name].forecasts for name in ["bear", "base", "bull"]}
@@ -233,15 +245,13 @@ def generate_report(request: ReportRequest, progress_callback: ProgressCallback 
         executive_summary_agent(snapshot, dcfs["base"], recommendation),
         _validation_section(model),
         _llm_model_section(model, llm_pack, peer_selection),
-        SectionOutput(title="Validated 12-month risk/reward", narrative="The base target price is the validated base DCF output. LLMs inform assumptions and challenge the model; Python performs the calculation and validation.", bullets=[f"Bear DCF valuation: {model.valuation_summary.get('bear_target_price'):,.2f}", f"Base DCF valuation: {model.valuation_summary.get('base_target_price'):,.2f}", f"Bull DCF valuation: {model.valuation_summary.get('bull_target_price'):,.2f}", f"Dynamic peer set: {', '.join(peers) if peers else 'n/a'}"]),
+        SectionOutput(title="Validated 12-month risk/reward", narrative="The report separates intrinsic DCF from the DCF-led 12-month target. LLMs inform assumptions and challenge the model; Python performs calculation and validation.", bullets=[f"Intrinsic base DCF: {model.valuation_summary.get('intrinsic_dcf_base_target_price'):,.2f}" if model.valuation_summary.get('intrinsic_dcf_base_target_price') else "Intrinsic base DCF: n/a", f"12-month bear target: {model.valuation_summary.get('bear_target_price'):,.2f}" if model.valuation_summary.get('bear_target_price') else "12-month bear target: n/a", f"12-month base target: {model.valuation_summary.get('base_target_price'):,.2f}" if model.valuation_summary.get('base_target_price') else "12-month base target: n/a", f"12-month bull target: {model.valuation_summary.get('bull_target_price'):,.2f}" if model.valuation_summary.get('bull_target_price') else "12-month bull target: n/a", f"Analyst consensus anchor: {model.valuation_summary.get('analyst_consensus_target'):,.2f}" if model.valuation_summary.get('analyst_consensus_target') else "Analyst consensus anchor: n/a", f"Dynamic peer set: {', '.join(peers) if peers else 'n/a'}"]),
         _llm_committee_section(llm_committee),
         company_overview_agent(snapshot), business_model_agent(snapshot), market_agent(snapshot), competitive_landscape_agent(snapshot, comps), commercial_drivers_agent(snapshot), historical_financials_agent(historicals), valuation_agent(snapshot, dcfs), technical_agent(technicals), risk_agent(snapshot, upside), qa_agent(plan, snapshot, dcfs),
     ]
     _emit(progress_callback, agent="Report Agents", status="complete", phase="report_generation", message="Report sections complete.")
 
-    report = FullReport(
-        plan=plan, snapshot=snapshot, historicals=historicals, technicals=technicals, assumptions=assumptions, forecasts=forecasts, dcf_outputs=dcfs, sensitivities=sensitivities, sections=sections, recommendation=recommendation, target_price=target_price, upside_downside=upside, company_classification=company_classification, dynamic_assumptions=dynamic_assumptions, financial_model_plan=financial_model_plan, company_evidence=evidence, peer_comps=comps, dynamic_valuation=dynamic_valuation, validated_model=model, llm_committee=llm_committee,
-    )
+    report = FullReport(plan=plan, snapshot=snapshot, historicals=historicals, technicals=technicals, assumptions=assumptions, forecasts=forecasts, dcf_outputs=dcfs, sensitivities=sensitivities, sections=sections, recommendation=recommendation, target_price=target_price, upside_downside=upside, company_classification=company_classification, dynamic_assumptions=dynamic_assumptions, financial_model_plan=financial_model_plan, company_evidence=evidence, peer_comps=comps, dynamic_valuation=dynamic_valuation, validated_model=model, llm_committee=llm_committee)
 
     output_root = Path("outputs")
     chart_dir = output_root / "charts"
