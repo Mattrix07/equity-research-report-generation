@@ -39,7 +39,7 @@ from src.agents.report_agents import (
     technical_agent,
     valuation_agent,
 )
-from src.data.yfinance_client import fetch_historical_financials, fetch_market_snapshot, fetch_peer_snapshot, fetch_price_history
+from src.data.provider import fetch_historical_financials, fetch_market_snapshot, fetch_peer_snapshot, fetch_price_history
 from src.engines.chart_engine import chart_forecast_revenue, chart_margin_forecast, chart_price_technicals
 from src.engines.comps_engine import run_comps
 from src.engines.dynamic_valuation_engine import run_dynamic_valuation
@@ -165,7 +165,7 @@ def generate_report(request: ReportRequest, progress_callback: ProgressCallback 
 
     _emit(progress_callback, agent="Financial Data Agent", status="running", phase="data_collection", mode="parallel-ready", group="Data", message="Fetching financial statements and market data, including yfinance analyst target fields where available.")
     historicals = fetch_historical_financials(snapshot.ticker)
-    _emit(progress_callback, agent="Financial Data Agent", status="complete", phase="data_collection", mode="parallel-ready", group="Data", message=f"Collected {len(historicals.revenue)} revenue years.")
+    _emit(progress_callback, agent="Financial Data Agent", status="complete", phase="data_collection", mode="parallel-ready", group="Data", message=f"Collected {len(historicals.revenue)} revenue years from {historicals.source}.")
 
     _emit(progress_callback, agent="LLM Peer Selection Agent", status="running", phase="peer_selection", mode="sequential", message="Selecting comparable companies using LLM judgement and Python verification.", reasoning_steps=["Create a candidate shortlist from sector and business description.", "Use an internet-platform shortlist for digital advertising/social media businesses.", "Ask LLM to select most relevant peers and explain exclusions.", "Verify selected tickers through market data before use."])
     if request.peers:
@@ -251,7 +251,9 @@ def generate_report(request: ReportRequest, progress_callback: ProgressCallback 
     ]
     _emit(progress_callback, agent="Report Agents", status="complete", phase="report_generation", message="Report sections complete.")
 
-    report = FullReport(plan=plan, snapshot=snapshot, historicals=historicals, technicals=technicals, assumptions=assumptions, forecasts=forecasts, dcf_outputs=dcfs, sensitivities=sensitivities, sections=sections, recommendation=recommendation, target_price=target_price, upside_downside=upside, company_classification=company_classification, dynamic_assumptions=dynamic_assumptions, financial_model_plan=financial_model_plan, company_evidence=evidence, peer_comps=comps, dynamic_valuation=dynamic_valuation, validated_model=model, llm_committee=llm_committee)
+    report = FullReport(
+        plan=plan, snapshot=snapshot, historicals=historicals, technicals=technicals, assumptions=assumptions, forecasts=forecasts, dcf_outputs=dcfs, sensitivities=sensitivities, sections=sections, recommendation=recommendation, target_price=target_price, upside_downside=upside, company_classification=company_classification, dynamic_assumptions=dynamic_assumptions, financial_model_plan=financial_model_plan, company_evidence=evidence, peer_comps=comps, dynamic_valuation=dynamic_valuation, validated_model=model, llm_committee=llm_committee,
+    )
 
     output_root = Path("outputs")
     chart_dir = output_root / "charts"
