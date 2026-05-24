@@ -32,9 +32,15 @@ def _dict_from_series(series: pd.Series, scale: float = 1.0) -> dict[str, float]
     return dict(sorted(out.items()))
 
 
+def _ticker_info(ticker: str) -> dict[str, Any]:
+    try:
+        return yf.Ticker(ticker).info or {}
+    except Exception:
+        return {}
+
+
 def fetch_market_snapshot(ticker: str, company_name: str | None = None) -> MarketSnapshot:
-    yf_ticker = yf.Ticker(ticker)
-    info = yf_ticker.info or {}
+    info = _ticker_info(ticker)
     current_price = _safe_float(info.get("currentPrice") or info.get("regularMarketPrice"))
     total_debt = _safe_float(info.get("totalDebt")) or 0.0
     total_cash = _safe_float(info.get("totalCash")) or 0.0
@@ -65,6 +71,24 @@ def fetch_market_snapshot(ticker: str, company_name: str | None = None) -> Marke
         fifty_two_week_low=_safe_float(info.get("fiftyTwoWeekLow")),
         business_summary=info.get("longBusinessSummary") or "",
     )
+
+
+def fetch_analyst_price_targets(ticker: str) -> dict[str, float | int | None]:
+    """Return yfinance analyst target fields for sanity checking.
+
+    These are not treated as truth, but they are useful to stop the system from
+    issuing a severe automated SELL when the DCF is detached from the observable
+    analyst target range without a clear model explanation.
+    """
+    info = _ticker_info(ticker)
+    return {
+        "target_mean_price": _safe_float(info.get("targetMeanPrice")),
+        "target_median_price": _safe_float(info.get("targetMedianPrice")),
+        "target_high_price": _safe_float(info.get("targetHighPrice")),
+        "target_low_price": _safe_float(info.get("targetLowPrice")),
+        "number_of_analyst_opinions": int(info.get("numberOfAnalystOpinions") or 0) if info.get("numberOfAnalystOpinions") is not None else None,
+        "recommendation_mean": _safe_float(info.get("recommendationMean")),
+    }
 
 
 def fetch_historical_financials(ticker: str) -> HistoricalFinancials:
