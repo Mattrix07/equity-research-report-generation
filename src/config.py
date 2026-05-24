@@ -15,6 +15,13 @@ def _float_env(name: str, default: float) -> float:
         return default
 
 
+def _int_env(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
 def _bool_env(name: str, default: bool = False) -> bool:
     value = os.getenv(name)
     if value is None:
@@ -31,7 +38,19 @@ OPENAI_MODEL_DEFAULT = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
 @dataclass(frozen=True)
 class Settings:
-    port: int = int(os.getenv("PORT", "8080"))
+    port: int = _int_env("PORT", 8080)
+
+    # Data provider configuration.
+    # Use DATA_PROVIDER=fmp when FMP_API_KEY is available. The data provider layer
+    # still falls back to yfinance if FMP is unavailable or returns incomplete data.
+    data_provider: str = os.getenv("DATA_PROVIDER", "yfinance").strip().lower()
+    fmp_api_key: str = os.getenv("FMP_API_KEY", "")
+    fmp_base_url: str = os.getenv("FMP_BASE_URL", "https://financialmodelingprep.com/stable")
+    fmp_statement_limit: int = _int_env("FMP_STATEMENT_LIMIT", 10)
+    fmp_timeout_seconds: float = _float_env("FMP_TIMEOUT_SECONDS", 30.0)
+    min_statement_years: int = _int_env("MIN_STATEMENT_YEARS", 5)
+
+    # OpenAI-compatible LLM configuration.
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
     openai_base_url: str = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
     openai_model: str = OPENAI_MODEL_DEFAULT
@@ -43,7 +62,11 @@ class Settings:
     llm_valuation_model: str = _model_env("LLM_VALUATION_MODEL", OPENAI_MODEL_DEFAULT)
     llm_report_writer_model: str = _model_env("LLM_REPORT_WRITER_MODEL", OPENAI_MODEL_DEFAULT)
     llm_qa_model: str = _model_env("LLM_QA_MODEL", OPENAI_MODEL_DEFAULT)
+
+    # Optional native Excel recalculation.
     enable_excel_runtime: bool = _bool_env("ENABLE_EXCEL_RUNTIME", False)
+
+    # Fallback modelling assumptions.
     default_wacc: float = _float_env("DEFAULT_WACC", 0.095)
     default_terminal_growth: float = _float_env("DEFAULT_TERMINAL_GROWTH", 0.025)
     default_tax_rate: float = _float_env("DEFAULT_TAX_RATE", 0.25)
