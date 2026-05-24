@@ -1,15 +1,16 @@
 # Equity Research Report Generation
 
-A localhost prototype for generating structured equity research reports and simplified Excel valuation models using a multi-agent workflow, dynamic peer selection, DCF-led valuation and optional native Excel recalculation.
+A localhost prototype for generating structured equity research reports and linked Excel valuation models using a multi-agent workflow, dynamic peer selection, DCF-led valuation, Financial Modeling Prep statement data where configured, and optional native Excel recalculation.
 
 ## What this prototype does
 
 - Runs a FastAPI localhost app.
 - Generates a structured initiation, update, quick-view or valuation-only report.
-- Pulls public market and financial data with `yfinance`.
+- Uses Financial Modeling Prep as the preferred structured financial-statement provider when `FMP_API_KEY` is configured.
+- Falls back to `yfinance` if FMP is not configured or fails.
 - Uses a multi-agent LLM committee when enabled.
 - Selects peers dynamically rather than relying on a fixed sector peer list.
-- Produces a simplified seven-tab Excel model:
+- Produces a formula-linked Excel model:
   - Assumptions
   - 3 Statement Model
   - WACC
@@ -17,11 +18,11 @@ A localhost prototype for generating structured equity research reports and simp
   - Comps Analysis
   - Football Field
   - Sensitivity Analysis
-- Uses a fixed template-controlled Excel export path rather than allowing the LLM to invent workbook formulas.
-- Validates key workbook links before returning the file.
+  - Model Audit
+- Separates intrinsic DCF value from the DCF-led 12-month target-price bridge.
 - Optionally recalculates the workbook through native Microsoft Excel using `xlwings` when `ENABLE_EXCEL_RUNTIME=true`.
 
-The Excel workbook is intentionally simple. The LLMs are used for research, assumptions, narrative, risks and investment committee synthesis. Excel remains the calculation layer.
+The Excel workbook is generated from a fixed template. LLMs are used for research, assumptions, peer selection, risk framing and investment committee synthesis. Excel remains the auditable calculation layer.
 
 ## Repository structure
 
@@ -31,16 +32,17 @@ equity-research-report-generation/
 │   ├── main.py
 │   ├── config.py
 │   ├── schemas.py
-│   ├── workflow.py
+│   ├── workflow_iterative.py
 │   ├── agents/
 │   ├── data/
+│   │   ├── provider.py
+│   │   ├── fmp_client.py
+│   │   └── yfinance_client.py
 │   ├── engines/
 │   ├── excel/
-│   │   ├── excel_runtime.py
-│   │   └── validate_workbook.py
 │   ├── report/
-│   │   ├── simplified_excel_exporter.py
-│   │   ├── repaired_simplified_excel_exporter.py
+│   │   ├── formula_model_excel_exporter.py
+│   │   ├── validated_model_excel_exporter.py
 │   │   └── renderer.py
 │   └── ui/
 ├── outputs/
@@ -63,6 +65,51 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
+## Configuration
+
+Add your keys to `.env`. Do not commit real API keys.
+
+```env
+PORT=8080
+
+# Preferred structured financial statement provider
+DATA_PROVIDER=fmp
+FMP_API_KEY=your_financial_modeling_prep_api_key_here
+FMP_BASE_URL=https://financialmodelingprep.com/stable
+FMP_STATEMENT_LIMIT=10
+FMP_TIMEOUT_SECONDS=30
+MIN_STATEMENT_YEARS=5
+
+# LLM configuration
+ENABLE_LLM_COMMITTEE=true
+OPENAI_API_KEY=your_openai_key_here
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_MODEL=gpt-4o-mini
+LLM_MANAGER_MODEL=gpt-4o-mini
+LLM_BULL_MODEL=gpt-4o-mini
+LLM_BEAR_MODEL=gpt-4o-mini
+LLM_VALUATION_MODEL=gpt-4o-mini
+LLM_REPORT_WRITER_MODEL=gpt-4o-mini
+LLM_QA_MODEL=gpt-4o-mini
+
+# Optional native Excel recalculation
+ENABLE_EXCEL_RUNTIME=false
+```
+
+### Data provider behaviour
+
+```text
+DATA_PROVIDER=fmp
+        ↓
+Try FMP income statement, balance sheet and cash flow statement
+        ↓
+If FMP succeeds and returns enough history, use FMP data
+        ↓
+If FMP fails or is incomplete, fall back to yfinance and mark the source in the workbook audit tab
+```
+
+FMP is preferred because it returns structured statement history needed for a better three-statement model. `yfinance` remains useful for market snapshot, price history and fallback data.
+
 ## Run
 
 ```bash
@@ -84,39 +131,50 @@ outputs/models/
 
 ## Excel model approach
 
-The Excel model now follows a controlled template approach:
+The Excel model follows a controlled template approach:
 
 ```text
-Python / agents collect data and assumptions
+FMP/yfinance collect statement data and market data
         ↓
-Fixed seven-tab Excel model is generated
+Python normalises historical financials
         ↓
-Workbook formulas are patched only from a known cell map
+LLM agents derive bounded assumptions when enabled
         ↓
-Workbook structure is validated
+Formula-driven Excel model is generated
+        ↓
+DCF and sensitivity tabs reference the 3 Statement Model, WACC and Assumptions tabs
         ↓
 Optional native Excel recalculation via xlwings
         ↓
 Workbook is returned to the UI
 ```
 
-This avoids the earlier issue where generated formulas became too complex, circular or inconsistent.
+The workbook contains five historical years and a ten-year Excel forecast view. The historical balance sheet is populated from FMP when available. If FMP is unavailable, the workbook will show the fallback source in the Model Audit tab.
 
-The scenario selector is in:
+## Example API request
 
-```text
-Assumptions!B3
+```bash
+curl -X POST http://localhost:8080/report/initiation \
+  -H "Content-Type: application/json" \
+  -d '{"ticker":"NVDA","company_name":"NVIDIA Corporation","report_type":"initiation"}'
 ```
 
-Valid values:
+The JSON response includes:
 
-```text
-Bear
-Base
-Bull
+```json
+{
+  "report_url": "/outputs/reports/nvda_initiation_report.html",
+  "excel_model_url": "/outputs/models/nvda_initiation_formula_model.xlsx"
+}
 ```
 
-The selected scenario flows into the 3 Statement Model, WACC, DCF, Football Field and Sensitivity Analysis tabs.
+You can also call:
+
+```bash
+curl -X POST http://localhost:8080/model/excel \
+  -H "Content-Type: application/json" \
+  -d '{"ticker":"NVDA","company_name":"NVIDIA Corporation","report_type":"initiation"}'
+```
 
 ## Optional native Excel recalculation
 
@@ -132,63 +190,12 @@ If you are running locally on a machine with Microsoft Excel installed, you can 
 ENABLE_EXCEL_RUNTIME=true
 ```
 
-This requires:
-
-```bash
-pip install xlwings
-```
-
-`xlwings` is included in `requirements.txt`, but native recalculation still requires Microsoft Excel to be installed on your machine. Keep this disabled on headless servers.
-
-## Example API request
-
-```bash
-curl -X POST http://localhost:8080/report/initiation \
-  -H "Content-Type: application/json" \
-  -d '{"ticker":"AAPL","company_name":"Apple Inc.","report_type":"initiation"}'
-```
-
-The JSON response includes:
-
-```json
-{
-  "report_url": "/outputs/reports/aapl_initiation_report.html",
-  "excel_model_url": "/outputs/models/aapl_initiation_simplified_model.xlsx"
-}
-```
-
-You can also call:
-
-```bash
-curl -X POST http://localhost:8080/model/excel \
-  -H "Content-Type: application/json" \
-  -d '{"ticker":"AAPL","company_name":"Apple Inc.","report_type":"initiation"}'
-```
-
-## Optional LLM configuration
-
-The prototype works without an LLM key. If you want LLM-written investment committee commentary, configure an OpenAI-compatible endpoint:
-
-```env
-ENABLE_LLM_COMMITTEE=true
-OPENAI_API_KEY=your_key_here
-OPENAI_BASE_URL=https://api.openai.com/v1
-OPENAI_MODEL=gpt-4o-mini
-```
-
-You can route different agents to different models:
-
-```env
-LLM_BULL_MODEL=gpt-4o-mini
-LLM_BEAR_MODEL=gpt-4o-mini
-LLM_VALUATION_MODEL=gpt-4o-mini
-LLM_REPORT_WRITER_MODEL=gpt-4o-mini
-```
+This requires Microsoft Excel to be installed on your machine. Keep this disabled on headless servers.
 
 ## Current limitations
 
 - This is not investment advice.
-- Financial data comes from public `yfinance` fields and may be incomplete for some stocks.
-- The workbook is simplified and should be reviewed by a human analyst.
+- FMP and yfinance are third-party data sources and may contain gaps or different field definitions.
+- The model is formula-linked and more auditable than previous versions, but assumptions still require human review.
 - Native Excel recalculation only works locally where Microsoft Excel is installed.
-- The app validates workbook structure and references, but it cannot fully audit accounting judgement or forecast assumptions.
+- The app validates model structure and references, but it cannot fully audit accounting judgement or forecast assumptions.
