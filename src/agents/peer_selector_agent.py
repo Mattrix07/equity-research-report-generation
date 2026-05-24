@@ -1,24 +1,26 @@
 """Dynamic peer selection agent.
 
-The goal is to avoid one static sector peer list. The selector starts from a broad
-candidate universe, filters and scores companies by sector, industry, market-cap
-similarity, revenue similarity and business-summary overlap, then returns the
-best 4-5 peers for the requested company.
+The selector avoids static sector defaults, but it should also avoid the previous
+slow path of calling yfinance for the entire broad universe on every request.
+It now shortlists candidates by sector/industry/business keywords first, then
+fetches only the most relevant candidates concurrently and scores those.
 
 User-supplied peers still take precedence.
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import math
 import re
+from functools import lru_cache
 from typing import Any
 
 from src.data.yfinance_client import fetch_market_snapshot
 from src.schemas import MarketSnapshot
 
-# Broad discovery universe. These are not default peers for a sector; they are
-# candidates that are dynamically scored against the requested company.
 CANDIDATE_UNIVERSE = sorted(set([
+    # Networking, communications infrastructure, security and adjacent infrastructure software
+    "CSCO", "ANET", "JNPR", "HPE", "DELL", "NTAP", "PSTG", "FFIV", "CIEN", "COMM", "UI", "MSI", "PANW", "FTNT", "CHKP", "ZS", "CRWD", "NET",
     # Mega / large-cap tech and software
     "AAPL", "MSFT", "GOOGL", "META", "AMZN", "ORCL", "CRM", "ADBE", "NOW", "INTU", "IBM", "SAP", "SNOW", "DDOG",
     # Semis / hardware
@@ -44,6 +46,27 @@ CANDIDATE_UNIVERSE = sorted(set([
     "NEE", "DUK", "SO", "D", "AEP", "EXC", "PLD", "AMT", "CCI", "EQIX", "SPG", "O",
 ]))
 
+SECTOR_SHORTLISTS = {
+    "technology": ["MSFT", "ORCL", "IBM", "CRM", "ADBE", "NOW", "ANET", "JNPR", "HPE", "DELL", "NTAP", "PANW", "FTNT", "CHKP", "FFIV", "CIEN"],
+    "healthcare": ["JNJ", "PFE", "MRK", "ABBV", "BMY", "AMGN", "GILD", "REGN", "VRTX", "TMO", "DHR", "ABT", "MDT", "SYK"],
+    "financial": ["JPM", "BAC", "WFC", "C", "GS", "MS", "USB", "PNC", "SCHW", "BLK"],
+    "consumer": ["WMT", "COST", "TGT", "HD", "LOW", "MCD", "SBUX", "NKE", "LULU", "TJX"],
+    "industrial": ["CAT", "DE", "HON", "GE", "MMM", "ETN", "EMR", "PH", "ROK", "ITW"],
+    "energy": ["XOM", "CVX", "COP", "EOG", "SLB", "OXY", "MPC", "VLO"],
+}
+
+KEYWORD_SHORTLISTS = {
+    "network": ["ANET", "JNPR", "HPE", "DELL", "FFIV", "CIEN", "COMM", "UI", "MSI"],
+    "switch": ["ANET", "JNPR", "HPE", "DELL", "FFIV"],
+    "router": ["ANET", "JNPR", "HPE", "FFIV"],
+    "security": ["PANW", "FTNT", "CHKP", "ZS", "CRWD", "NET"],
+    "cloud": ["MSFT", "AMZN", "GOOGL", "ORCL", "IBM", "SNOW", "DDOG", "NET"],
+    "semiconductor": ["NVDA", "AMD", "AVGO", "QCOM", "INTC", "TXN", "MRVL"],
+    "biotech": ["AMGN", "GILD", "REGN", "VRTX", "BIIB", "MRNA", "ALNY", "BMRN"],
+    "pharma": ["LLY", "NVO", "MRK", "PFE", "ABBV", "BMY", "AZN", "NVS"],
+    "medical": ["TMO", "DHR", "ABT", "MDT", "SYK", "BSX", "ISRG", "EW"],
+}
+
 STOPWORDS = {
     "the", "and", "for", "with", "that", "this", "from", "into", "its", "their", "company", "companies", "products",
     "services", "including", "provides", "develops", "operates", "markets", "business", "customers", "through", "segment",
@@ -60,6 +83,32 @@ def _similarity(a: float | None, b: float | None) -> float:
         return 0.0
     distance = abs(math.log(a) - math.log(b))
     return max(0.0, 1.0 - min(distance / 2.5, 1.0))
+
+
+@lru_cache(maxsize=512)
+def _cached_snapshot(ticker: str) -> MarketSnapshot:
+    return fetch_market_snapshot(ticker)
+
+
+def _candidate_shortlist(target: MarketSnapshot, max_candidates: int = 28) -> list[str]:
+    target_text = f"{target.sector} {target.industry} {target.business_summary}".lower()
+    candidates: list[str] = []
+
+    for sector_key, tickers in SECTOR_SHORTLISTS.items():
+        if sector_key in target_text:
+            candidates.extend(tickers)
+
+    for keyword, tickers in KEYWORD_SHORTLISTS.items():
+        if keyword in target_text:
+            candidates.extend(tickers)
+
+    # If the text match is sparse, use the broad universe as a fallback, but cap
+    # the fetch count. This keeps the UI from sitting on peer selection for ages.
+    if not candidates:
+        candidates.extend(CANDIDATE_UNIVERSE[:max_candidates])
+
+    candidates = [ticker for ticker in dict.fromkeys(candidates) if ticker.upper() != target.ticker.upper()]
+    return candidates[:max_candidates]
 
 
 def _score_peer(target: MarketSnapshot, peer: MarketSnapshot) -> tuple[float, list[str]]:
@@ -94,8 +143,6 @@ def _score_peer(target: MarketSnapshot, peer: MarketSnapshot) -> tuple[float, li
             score += min(overlap * 20, 10)
             reasons.append("business description overlap")
 
-    # Penalise companies with missing enterprise value or EBITDA because they are
-    # less useful for EV/EBITDA comps.
     if not peer.enterprise_value or not peer.ebitda:
         score -= 8
         reasons.append("incomplete multiple data")
@@ -107,23 +154,22 @@ def select_dynamic_peer_tickers(target: MarketSnapshot, user_peers: list[str] | 
     if user_peers:
         return [p.upper().strip() for p in user_peers if p and p.upper().strip() != target.ticker.upper()][:max_peers]
 
+    candidates = _candidate_shortlist(target)
     scored: list[tuple[float, str, list[str]]] = []
-    for ticker in CANDIDATE_UNIVERSE:
-        if ticker.upper() == target.ticker.upper():
-            continue
-        try:
-            peer = fetch_market_snapshot(ticker)
-        except Exception:
-            continue
-        score, reasons = _score_peer(target, peer)
-        if score > 0:
-            scored.append((score, ticker, reasons))
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        future_map = {executor.submit(_cached_snapshot, ticker): ticker for ticker in candidates}
+        for future in as_completed(future_map):
+            ticker = future_map[future]
+            try:
+                peer = future.result()
+            except Exception:
+                continue
+            score, reasons = _score_peer(target, peer)
+            if score > 0:
+                scored.append((score, ticker, reasons))
 
     scored.sort(reverse=True, key=lambda x: x[0])
     selected = [ticker for _, ticker, _ in scored[:max_peers]]
-
-    # If the dynamic score is too restrictive, return the best available scored
-    # peers rather than a static sector default.
     return selected[:max_peers]
 
 
