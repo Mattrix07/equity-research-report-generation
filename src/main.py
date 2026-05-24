@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import queue
 import sys
 import threading
+import traceback
 from pathlib import Path
 
 # Allow `python3 src/main.py` from repo root.
@@ -19,6 +21,12 @@ import uvicorn
 from src.config import settings
 from src.schemas import ReportRequest
 from src.workflow_iterative import generate_report
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+)
+logger = logging.getLogger("equity_research_app")
 
 app = FastAPI(title="Equity Research Report Generator", version="0.2.0")
 
@@ -58,12 +66,21 @@ def create_initiation_report(request: ReportRequest):
     try:
         report = generate_report(request)
     except Exception as exc:  # pragma: no cover - surfaced to localhost user
+        logger.exception("Workflow failed while generating initiation report for %s", request.ticker)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     return _report_response(report)
 
 
 @app.post("/report/stream")
 def stream_report(request: ReportRequest):
+    """Stream agent progress events and log full tracebacks from worker threads.
+
+    FastAPI does not automatically print exceptions that are caught inside this
+    background worker. Previously the UI showed the short error message while the
+    terminal showed only the normal HTTP 200 for the streaming connection. We now
+    explicitly log traceback.format_exc() so local debugging shows the exact file
+    and line number.
+    """
     event_queue: queue.Queue[dict] = queue.Queue()
 
     def emit(event: dict):
@@ -74,7 +91,9 @@ def stream_report(request: ReportRequest):
             report = generate_report(request, progress_callback=emit)
             event_queue.put({"type": "result", **_report_response(report)})
         except Exception as exc:
-            event_queue.put({"type": "error", "detail": str(exc)})
+            tb = traceback.format_exc()
+            logger.error("Workflow failed while streaming report for %s\n%s", request.ticker, tb)
+            event_queue.put({"type": "error", "detail": str(exc), "traceback": tb})
         finally:
             event_queue.put({"type": "done"})
 
