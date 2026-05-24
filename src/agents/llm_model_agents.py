@@ -11,6 +11,7 @@ All outputs are JSON and bounded before use in the model.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 from dataclasses import dataclass, field
 from typing import Any
@@ -41,6 +42,18 @@ class LLMModelAssumptionPack:
             "terminal_value": self.terminal_value,
             "validation_revision": self.validation_revision,
         }
+
+
+async def _close_client(client: AsyncOpenAI) -> None:
+    try:
+        close = getattr(client, "close", None) or getattr(client, "aclose", None)
+        if close is None:
+            return
+        result = close()
+        if inspect.isawaitable(result):
+            await result
+    except Exception:
+        pass
 
 
 def _json(data: Any, max_chars: int = 55000) -> str:
@@ -146,49 +159,53 @@ async def run_llm_model_assumption_agents(
         return LLMModelAssumptionPack(enabled=False, warnings=["LLM model agents disabled or API key missing."])
 
     client = AsyncOpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url)
-    common_payload = {
-        "company": snapshot.model_dump(),
-        "historicals": _historical_summary(historicals),
-        "selected_or_candidate_peers": peers or [],
-        "prior_model": prior_model or {},
-        "validation_feedback": validation_feedback or {},
-        "guardrails": {
-            "do_not_invent_missing_facts": True,
-            "return_decimal_percentages": True,
-            "forecast_years": 5,
-            "purpose": "derive evidence-based assumptions for a 5-year DCF and 12-month target price",
-        },
-    }
+    try:
+        common_payload = {
+            "company": snapshot.model_dump(),
+            "historicals": _historical_summary(historicals),
+            "selected_or_candidate_peers": peers or [],
+            "prior_model": prior_model or {},
+            "validation_feedback": validation_feedback or {},
+            "guardrails": {
+                "do_not_invent_missing_facts": True,
+                "return_decimal_percentages": True,
+                "forecast_years": 5,
+                "purpose": "derive evidence-based assumptions for a 5-year DCF and 12-month target price",
+            },
+        }
 
-    forecast_system = (
-        "You are a fundamental forecasting analyst. Derive company-specific base-case operating assumptions from the evidence only. "
-        "Return JSON with: revenue_growth as 5 decimals, ebitda_margin as 5 decimals, da_percent_revenue, capex_percent_revenue, "
-        "nwc_percent_revenue, tax_rate, rationale, reasoning_steps, evidence_gaps. Do not calculate target price."
-    )
-    wacc_system = (
-        "You are a WACC analyst. Derive a company-specific WACC using beta, risk-free-rate context, equity risk premium, debt/capital structure, "
-        "tax rate and business risk. Return JSON with: cost_of_equity, after_tax_cost_of_debt, wacc, tax_rate, rationale, reasoning_steps, evidence_gaps. "
-        "Use decimal percentages. Do not invent facts if data is missing."
-    )
-    terminal_system = (
-        "You are a terminal value analyst. Decide an appropriate terminal growth assumption for a mature operating-company DCF. "
-        "Return JSON with: terminal_growth, rationale, reasoning_steps, evidence_gaps. Use a conservative decimal value."
-    )
-    revision_system = (
-        "You are a model validation revision agent. If validation feedback indicates the model is detached from market or assumptions are weak, "
-        "propose bounded revisions to assumptions without forcing the valuation to match the market. Return JSON with optional revenue_growth, "
-        "ebitda_margin, capex_percent_revenue, nwc_percent_revenue, wacc, terminal_growth, revision_instructions, reasoning_steps, evidence_gaps."
-    )
+        forecast_system = (
+            "You are a fundamental forecasting analyst. Derive company-specific base-case operating assumptions from the evidence only. "
+            "Return JSON with: revenue_growth as 5 decimals, ebitda_margin as 5 decimals, da_percent_revenue, capex_percent_revenue, "
+            "nwc_percent_revenue, tax_rate, rationale, reasoning_steps, evidence_gaps. Do not calculate target price."
+        )
+        wacc_system = (
+            "You are a WACC analyst. Derive a company-specific WACC using beta, risk-free-rate context, equity risk premium, debt/capital structure, "
+            "tax rate and business risk. Return JSON with: cost_of_equity, after_tax_cost_of_debt, wacc, tax_rate, rationale, reasoning_steps, evidence_gaps. "
+            "Use decimal percentages. Do not invent facts if data is missing."
+        )
+        terminal_system = (
+            "You are a terminal value analyst. Decide an appropriate terminal growth assumption for a mature operating-company DCF. "
+            "Return JSON with: terminal_growth, rationale, reasoning_steps, evidence_gaps. Use a conservative decimal value."
+        )
+        revision_system = (
+            "You are a model validation revision agent. If validation feedback indicates the model is detached from market or assumptions are weak, "
+            "propose bounded revisions to assumptions without forcing the valuation to match the market. Return JSON with optional revenue_growth, "
+            "ebitda_margin, capex_percent_revenue, nwc_percent_revenue, wacc, terminal_growth, revision_instructions, reasoning_steps, evidence_gaps."
+        )
 
-    tasks = [
-        _call_json_agent(client, name="Forecast Assumption Agent", model=settings.llm_manager_model, system=forecast_system, payload=common_payload),
-        _call_json_agent(client, name="WACC Agent", model=settings.llm_valuation_model, system=wacc_system, payload=common_payload),
-        _call_json_agent(client, name="Terminal Value Agent", model=settings.llm_valuation_model, system=terminal_system, payload=common_payload),
-    ]
-    if validation_feedback:
-        tasks.append(_call_json_agent(client, name="Validation Revision Agent", model=settings.llm_qa_model, system=revision_system, payload=common_payload))
+        tasks = [
+            _call_json_agent(client, name="Forecast Assumption Agent", model=settings.llm_manager_model, system=forecast_system, payload=common_payload),
+            _call_json_agent(client, name="WACC Agent", model=settings.llm_valuation_model, system=wacc_system, payload=common_payload),
+            _call_json_agent(client, name="Terminal Value Agent", model=settings.llm_valuation_model, system=terminal_system, payload=common_payload),
+        ]
+        if validation_feedback:
+            tasks.append(_call_json_agent(client, name="Validation Revision Agent", model=settings.llm_qa_model, system=revision_system, payload=common_payload))
 
-    outputs = await asyncio.gather(*tasks)
+        outputs = await asyncio.gather(*tasks)
+    finally:
+        await _close_client(client)
+
     by_agent = {str(item.get("_agent", "unknown")): item for item in outputs}
     pack = LLMModelAssumptionPack(enabled=True, raw_outputs=by_agent)
     pack.forecast = _clean_assumption_output(by_agent.get("Forecast Assumption Agent", {}))
