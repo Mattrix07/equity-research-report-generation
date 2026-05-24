@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from openpyxl import Workbook
-from openpyxl.chart import BarChart
+from openpyxl.chart import BarChart, Reference
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
@@ -334,8 +334,16 @@ def _create_football_field(wb: Workbook) -> None:
     for row in [4, 5]:
         for col in [2, 3, 4]:
             ws.cell(row, col).number_format = PRICE_FMT
-    chart = BarChart(); chart.type = "bar"; chart.title = "Valuation Range"; chart.height = 7; chart.width = 14
-    chart.add_data(ws["B3:D5"], titles_from_data=True); chart.set_categories(ws["A4:A5"]); ws.add_chart(chart, "G3")
+    chart = BarChart()
+    chart.type = "bar"
+    chart.title = "Valuation Range"
+    chart.height = 7
+    chart.width = 14
+    data = Reference(ws, min_col=2, max_col=4, min_row=3, max_row=5)
+    categories = Reference(ws, min_col=1, min_row=4, max_row=5)
+    chart.add_data(data, titles_from_data=True)
+    chart.set_categories(categories)
+    ws.add_chart(chart, "G3")
 
 
 def _create_sensitivity(wb: Workbook, model: ValidatedFinancialModel) -> None:
