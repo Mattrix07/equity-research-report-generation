@@ -1,13 +1,16 @@
 """LLM-assisted peer selection.
 
 The LLM proposes a peer set and explains inclusions/exclusions. Python then
-verifies tickers and fetches market data. This keeps peer selection judgement-led
-without trusting unsupported LLM facts.
+normalises the LLM output, verifies that selected peers are valid candidate
+symbols, and fetches market data. This keeps peer selection judgement-led without
+trusting unsupported or malformed LLM facts.
 """
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -34,19 +37,49 @@ class LLMPeerSelection:
     def selected_tickers(self) -> list[str]:
         tickers: list[str] = []
         for ticker in self.primary_peers + self.secondary_peers:
-            clean = str(ticker).upper().strip()
+            clean = _clean_ticker(ticker)
             if clean and clean not in tickers:
                 tickers.append(clean)
         return tickers
 
 
+async def _close_client(client: AsyncOpenAI) -> None:
+    try:
+        close = getattr(client, "close", None) or getattr(client, "aclose", None)
+        if close is None:
+            return
+        result = close()
+        if inspect.isawaitable(result):
+            await result
+    except Exception:
+        # Closing is best-effort. We do not want cleanup issues to break report generation.
+        pass
+
+
 def _clean_ticker(value: Any) -> str | None:
-    ticker = str(value or "").upper().strip().replace(".", "-")
-    ticker = "".join(ch for ch in ticker if ch.isalnum() or ch in {"-"})
-    return ticker or None
+    """Extract a usable ticker from LLM output.
+
+    The LLM sometimes returns objects such as
+    {"ticker": "AMZN", "company_name": "Amazon", "rationale": "..."}
+    even when instructed to return strings. The old implementation stringified
+    the full object, creating invalid tickers like TICKERAMZNCOMPANYNAME...
+    """
+    if isinstance(value, dict):
+        for key in ("ticker", "symbol", "company_ticker"):
+            if key in value:
+                return _clean_ticker(value.get(key))
+        return None
+    if not isinstance(value, str):
+        return None
+    text = value.upper().strip().replace(".", "-")
+    # Accept direct ticker-like strings. Also tolerate "Ticker: AMZN".
+    match = re.search(r"\b[A-Z]{1,5}(?:-[A-Z])?\b", text)
+    if not match:
+        return None
+    return match.group(0)
 
 
-def _clean_ticker_list(values: Any, target_ticker: str, limit: int) -> list[str]:
+def _clean_ticker_list(values: Any, target_ticker: str, limit: int, allowed_tickers: set[str]) -> list[str]:
     if not isinstance(values, list):
         return []
     out: list[str] = []
@@ -54,9 +87,28 @@ def _clean_ticker_list(values: Any, target_ticker: str, limit: int) -> list[str]
         ticker = _clean_ticker(value)
         if not ticker or ticker == target_ticker.upper() or ticker in out:
             continue
+        if allowed_tickers and ticker not in allowed_tickers:
+            continue
         out.append(ticker)
         if len(out) >= limit:
             break
+    return out
+
+
+def _normalise_exclusions(values: Any) -> list[dict[str, Any]]:
+    if not isinstance(values, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for item in values[:10]:
+        if isinstance(item, dict):
+            ticker = _clean_ticker(item)
+            out.append({
+                "ticker": ticker,
+                "company_name": item.get("company_name") or item.get("name"),
+                "rationale": item.get("rationale") or item.get("reason"),
+            })
+        elif isinstance(item, str):
+            out.append({"ticker": _clean_ticker(item), "rationale": item})
     return out
 
 
@@ -64,16 +116,19 @@ async def select_peers_with_llm(snapshot: MarketSnapshot, candidate_tickers: lis
     if not llm_enabled():
         return LLMPeerSelection(enabled=False, error="LLM peer selector disabled or API key missing.")
 
+    allowed_tickers = {ticker for ticker in (_clean_ticker(t) for t in candidate_tickers) if ticker}
     client = AsyncOpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url)
     system_prompt = (
         "You are an equity research associate selecting comparable companies. "
         "Choose peers based on business model, revenue drivers, customer/end-market exposure, scale, margins, capital intensity and valuation relevance. "
         "Do not choose a company simply because it is in the same broad sector. "
-        "Use only the supplied company profile and candidate tickers. Return JSON only."
+        "Use only the supplied company profile and candidate tickers. Return JSON only. "
+        "IMPORTANT: primary_peers and secondary_peers must be arrays of ticker strings only, e.g. [\"NFLX\", \"DIS\"]. "
+        "Put rationale in peer_rationale or excluded_companies, never inside primary_peers or secondary_peers."
     )
     payload = {
         "target_company": snapshot.model_dump(),
-        "candidate_tickers": candidate_tickers,
+        "candidate_tickers": sorted(allowed_tickers),
         "instructions": {
             "max_primary_peers": max_peers,
             "max_secondary_peers": 3,
@@ -85,6 +140,11 @@ async def select_peers_with_llm(snapshot: MarketSnapshot, candidate_tickers: lis
                 "reasoning_steps",
                 "evidence_gaps",
             ],
+            "format_rules": {
+                "primary_peers": "array of ticker strings only",
+                "secondary_peers": "array of ticker strings only",
+                "excluded_companies": "array of objects with ticker and rationale",
+            },
         },
     }
     try:
@@ -104,11 +164,13 @@ async def select_peers_with_llm(snapshot: MarketSnapshot, candidate_tickers: lis
         )
         raw = response.choices[0].message.content or "{}"
         data = json.loads(raw)
+        primary = _clean_ticker_list(data.get("primary_peers"), snapshot.ticker, max_peers, allowed_tickers)
+        secondary = _clean_ticker_list(data.get("secondary_peers"), snapshot.ticker, 3, allowed_tickers)
         return LLMPeerSelection(
             enabled=True,
-            primary_peers=_clean_ticker_list(data.get("primary_peers"), snapshot.ticker, max_peers),
-            secondary_peers=_clean_ticker_list(data.get("secondary_peers"), snapshot.ticker, 3),
-            excluded_companies=list(data.get("excluded_companies", [])) if isinstance(data.get("excluded_companies"), list) else [],
+            primary_peers=primary,
+            secondary_peers=[ticker for ticker in secondary if ticker not in primary],
+            excluded_companies=_normalise_exclusions(data.get("excluded_companies")),
             peer_rationale=str(data.get("peer_rationale", "")),
             reasoning_steps=[str(x) for x in data.get("reasoning_steps", [])[:6]] if isinstance(data.get("reasoning_steps"), list) else [],
             evidence_gaps=[str(x) for x in data.get("evidence_gaps", [])[:6]] if isinstance(data.get("evidence_gaps"), list) else [],
@@ -116,6 +178,8 @@ async def select_peers_with_llm(snapshot: MarketSnapshot, candidate_tickers: lis
         )
     except Exception as exc:
         return LLMPeerSelection(enabled=True, error=str(exc))
+    finally:
+        await _close_client(client)
 
 
 def select_peers_with_llm_sync(snapshot: MarketSnapshot, candidate_tickers: list[str], max_peers: int = 5) -> LLMPeerSelection:
