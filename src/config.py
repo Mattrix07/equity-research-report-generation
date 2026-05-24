@@ -46,7 +46,11 @@ class Settings:
     data_provider: str = os.getenv("DATA_PROVIDER", "yfinance").strip().lower()
     fmp_api_key: str = os.getenv("FMP_API_KEY", "")
     fmp_base_url: str = os.getenv("FMP_BASE_URL", "https://financialmodelingprep.com/stable")
-    fmp_statement_limit: int = _int_env("FMP_STATEMENT_LIMIT", 10)
+    # FMP's free/basic plans commonly cap the statement `limit` parameter at 5.
+    # The FMP client defensively clamps requests to this cap unless explicitly
+    # changed by a paid-plan user.
+    fmp_statement_limit: int = _int_env("FMP_STATEMENT_LIMIT", 5)
+    fmp_statement_limit_cap: int = _int_env("FMP_STATEMENT_LIMIT_CAP", 5)
     fmp_timeout_seconds: float = _float_env("FMP_TIMEOUT_SECONDS", 30.0)
     min_statement_years: int = _int_env("MIN_STATEMENT_YEARS", 5)
 
