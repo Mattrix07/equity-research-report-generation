@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from math import isfinite
 from statistics import median
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -63,6 +63,11 @@ class ValidatedFinancialModel(BaseModel):
     selected_scenario: str = "base"
     valuation_summary: dict[str, float | None] = Field(default_factory=dict)
     validation: ModelValidationResult
+    # Optional metadata used by the iterative LLM-assisted workflow. These fields
+    # are kept here because iterative_model_validation_engine returns this shared
+    # model type.
+    iteration_count: int = 0
+    llm_assumption_pack: dict[str, Any] = Field(default_factory=dict)
 
 
 def _safe(value: float | None, default: float = 0.0) -> float:
