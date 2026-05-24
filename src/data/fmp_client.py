@@ -26,6 +26,19 @@ def _endpoint_url(endpoint: str) -> str:
     return f"{base}/{endpoint}"
 
 
+def _clamped_limit(limit: int | None = None) -> int:
+    """Keep FMP requests compatible with free/basic plans by default.
+
+    FMP returns HTTP 402 when the `limit` query parameter is above the user's
+    subscription cap. For many plans this cap is 5, which is exactly the minimum
+    historical period required by this workbook. Paid users can raise
+    FMP_STATEMENT_LIMIT_CAP in .env.
+    """
+    requested = int(limit or settings.fmp_statement_limit or 5)
+    cap = int(settings.fmp_statement_limit_cap or 5)
+    return max(1, min(requested, cap))
+
+
 def _get(endpoint: str, params: dict[str, Any] | None = None) -> Any:
     if not settings.fmp_api_key:
         raise FMPError("FMP_API_KEY is missing. Add it to your .env file or set DATA_PROVIDER=yfinance.")
@@ -50,8 +63,9 @@ def _as_list(data: Any, endpoint: str) -> list[dict[str, Any]]:
     return [row for row in data if isinstance(row, dict)]
 
 
-def _annual(endpoint: str, ticker: str, limit: int) -> list[dict[str, Any]]:
-    data = _get(endpoint, {"symbol": ticker.upper(), "period": "annual", "limit": limit})
+def _annual(endpoint: str, ticker: str, limit: int | None) -> list[dict[str, Any]]:
+    safe_limit = _clamped_limit(limit)
+    data = _get(endpoint, {"symbol": ticker.upper(), "period": "annual", "limit": safe_limit})
     rows = _as_list(data, endpoint)
     if not rows:
         raise FMPError(f"FMP returned no rows for {endpoint}/{ticker.upper()}")
@@ -99,11 +113,11 @@ def fetch_fmp_historical_financials(ticker: str, limit: int | None = None) -> Hi
     The returned object contains the full history required by the linked Excel
     model. Forecasting still happens in the modelling layer.
     """
-    limit = limit or settings.fmp_statement_limit
+    safe_limit = _clamped_limit(limit)
     ticker = ticker.upper()
-    income = _annual("income-statement", ticker, limit)
-    balance = _annual("balance-sheet-statement", ticker, limit)
-    cashflow = _annual("cash-flow-statement", ticker, limit)
+    income = _annual("income-statement", ticker, safe_limit)
+    balance = _annual("balance-sheet-statement", ticker, safe_limit)
+    cashflow = _annual("cash-flow-statement", ticker, safe_limit)
 
     revenue = _series(income, "revenue")
     gross_profit = _series(income, "grossProfit")
@@ -177,11 +191,11 @@ def fetch_fmp_historical_financials(ticker: str, limit: int | None = None) -> Hi
         total_liabilities=total_liabilities,
         shareholders_equity=shareholders_equity,
         shares_outstanding=shares_outstanding,
-        source="fmp",
+        source=f"fmp limit={safe_limit}",
     )
 
 
 def fetch_fmp_analyst_estimates(ticker: str, limit: int | None = None) -> list[dict[str, Any]]:
-    limit = limit or settings.fmp_statement_limit
-    rows = _get("analyst-estimates", {"symbol": ticker.upper(), "period": "annual", "limit": limit, "page": 0})
+    safe_limit = _clamped_limit(limit)
+    rows = _get("analyst-estimates", {"symbol": ticker.upper(), "period": "annual", "limit": safe_limit, "page": 0})
     return _as_list(rows, "analyst-estimates")
