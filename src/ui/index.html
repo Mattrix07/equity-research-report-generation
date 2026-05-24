@@ -5,27 +5,53 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Equity Research Report Generator</title>
   <style>
-    body { margin:0; font-family: Arial, Helvetica, sans-serif; background:#eef2f7; color:#0f172a; }
-    .wrap { max-width: 980px; margin: 40px auto; background:white; border-radius:18px; padding:32px; box-shadow:0 20px 40px rgba(15,23,42,.12); }
+    :root { --blue:#075985; --light:#e0f2fe; --slate:#0f172a; --muted:#64748b; --border:#dbe3ef; --ok:#16a34a; --run:#ca8a04; --err:#dc2626; }
+    body { margin:0; font-family: Arial, Helvetica, sans-serif; background:#eef2f7; color:var(--slate); }
+    .wrap { max-width: 1180px; margin: 32px auto; background:white; border-radius:18px; padding:30px; box-shadow:0 20px 40px rgba(15,23,42,.12); }
     h1 { margin:0 0 8px; font-size:32px; }
     p { color:#475569; line-height:1.45; }
     form { display:grid; gap:14px; margin-top:24px; }
     label { font-weight:bold; }
     input, select { width:100%; box-sizing:border-box; padding:12px 14px; border:1px solid #cbd5e1; border-radius:10px; font-size:16px; }
-    button { background:#075985; color:white; border:none; border-radius:10px; padding:14px 18px; font-size:16px; font-weight:bold; cursor:pointer; }
+    button { background:var(--blue); color:white; border:none; border-radius:10px; padding:14px 18px; font-size:16px; font-weight:bold; cursor:pointer; }
     button:hover { background:#0369a1; }
+    button:disabled { background:#94a3b8; cursor:not-allowed; }
     .grid { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
-    .status { margin-top:22px; padding:14px; border-radius:12px; background:#f8fafc; border:1px solid #dbe3ef; white-space:pre-wrap; }
-    a { color:#075985; font-weight:bold; }
-    .small { font-size:13px; color:#64748b; }
+    .layout { display:grid; grid-template-columns: 1.1fr .9fr; gap:18px; align-items:start; margin-top:22px; }
+    .status { padding:14px; border-radius:12px; background:#f8fafc; border:1px solid var(--border); white-space:pre-wrap; }
+    .small { font-size:13px; color:var(--muted); }
     .links { display:flex; gap:12px; margin-top:12px; flex-wrap:wrap; }
-    .linkButton { display:inline-block; padding:10px 12px; border:1px solid #075985; border-radius:10px; text-decoration:none; background:#e0f2fe; }
+    .linkButton { display:inline-block; padding:10px 12px; border:1px solid var(--blue); border-radius:10px; text-decoration:none; background:var(--light); color:var(--blue); font-weight:bold; }
+    .panel { border:1px solid var(--border); border-radius:16px; background:#f8fafc; overflow:hidden; }
+    .panel h2 { margin:0; padding:14px 16px; font-size:18px; background:#e2e8f0; }
+    .timeline { padding:14px; display:grid; gap:10px; }
+    .agent { background:white; border:1px solid #e2e8f0; border-radius:14px; padding:12px; box-shadow:0 6px 14px rgba(15,23,42,.04); }
+    .agentTop { display:flex; justify-content:space-between; align-items:center; gap:10px; }
+    .agentName { font-weight:800; }
+    .badge { font-size:12px; border-radius:999px; padding:4px 8px; background:#e2e8f0; color:#334155; white-space:nowrap; }
+    .running .badge { background:#fef3c7; color:#92400e; }
+    .complete .badge { background:#dcfce7; color:#166534; }
+    .skipped .badge { background:#e2e8f0; color:#475569; }
+    .error .badge { background:#fee2e2; color:#991b1b; }
+    .agentMsg { margin-top:6px; color:#334155; font-size:14px; }
+    .meta { margin-top:8px; display:flex; gap:6px; flex-wrap:wrap; }
+    .chip { font-size:11px; color:#475569; background:#f1f5f9; border:1px solid #e2e8f0; padding:3px 7px; border-radius:999px; }
+    .reasoning { margin:9px 0 0 0; padding-left:18px; color:#475569; font-size:13px; }
+    .architecture { padding:14px; display:grid; gap:9px; }
+    .flowRow { display:grid; grid-template-columns: 130px 1fr; gap:10px; align-items:center; }
+    .flowLabel { font-weight:bold; color:#334155; }
+    .flowCards { display:flex; flex-wrap:wrap; gap:8px; }
+    .flowCard { border:1px solid #cbd5e1; background:white; border-radius:999px; padding:7px 10px; font-size:13px; }
+    .arrow { color:var(--muted); padding-left:142px; }
+    .activePulse { animation:pulse 1.4s infinite; border-color:#f59e0b; }
+    @keyframes pulse { 0% { box-shadow:0 0 0 0 rgba(245,158,11,.35); } 70% { box-shadow:0 0 0 8px rgba(245,158,11,0); } 100% { box-shadow:0 0 0 0 rgba(245,158,11,0); } }
+    @media (max-width: 900px) { .grid, .layout { grid-template-columns:1fr; } .arrow { padding-left:0; } }
   </style>
 </head>
 <body>
   <div class="wrap">
     <h1>Equity Research Report Generator</h1>
-    <p>Generate a structured localhost equity research report and an analyst-style Excel model with source data, assumptions, forecast, WACC, DCF, comps, sensitivity and football-field tabs.</p>
+    <p>Generate a model-first equity research report. The UI now streams the workflow so you can see each agent running sequentially and in parallel.</p>
     <form id="reportForm">
       <div class="grid">
         <div>
@@ -53,18 +79,111 @@
           <input id="peers" name="peers" placeholder="MSFT,GOOGL,META" />
         </div>
       </div>
-      <button type="submit">Generate report + Excel model</button>
+      <button id="submitBtn" type="submit">Generate report + Excel model</button>
     </form>
-    <div id="status" class="status">Ready.</div>
+
+    <div class="layout">
+      <div class="panel">
+        <h2>Live agent workflow</h2>
+        <div id="timeline" class="timeline">
+          <div class="agent"><div class="agentTop"><span class="agentName">Ready</span><span class="badge">idle</span></div><div class="agentMsg">Click generate to stream the agent workflow.</div></div>
+        </div>
+      </div>
+      <div>
+        <div class="panel">
+          <h2>Architecture</h2>
+          <div class="architecture">
+            <div class="flowRow"><div class="flowLabel">Sequential</div><div class="flowCards"><span class="flowCard">Manager</span><span class="flowCard">Model Validation Agent</span></div></div>
+            <div class="arrow">↓</div>
+            <div class="flowRow"><div class="flowLabel">Parallel-ready</div><div class="flowCards"><span class="flowCard">Financial Data</span><span class="flowCard">Technical Data</span><span class="flowCard">Peer Data</span></div></div>
+            <div class="arrow">↓</div>
+            <div class="flowRow"><div class="flowLabel">Parallel LLMs</div><div class="flowCards"><span class="flowCard">Bull Analyst</span><span class="flowCard">Bear Analyst</span><span class="flowCard">Valuation Analyst</span></div></div>
+            <div class="arrow">↓</div>
+            <div class="flowRow"><div class="flowLabel">Sequential</div><div class="flowCards"><span class="flowCard">Committee Chair</span><span class="flowCard">Report Agents</span><span class="flowCard">Output Renderer</span></div></div>
+          </div>
+        </div>
+        <div id="status" class="status" style="margin-top:14px;">Ready.</div>
+      </div>
+    </div>
     <p class="small">Prototype only. Not investment advice. Review source data, assumptions, formulas and outputs before relying on any report or model.</p>
   </div>
 
 <script>
 const form = document.getElementById('reportForm');
 const statusEl = document.getElementById('status');
+const timelineEl = document.getElementById('timeline');
+const submitBtn = document.getElementById('submitBtn');
+const agents = new Map();
+
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+}
+
+function renderAgent(event) {
+  const key = event.agent || 'Unknown Agent';
+  agents.set(key, event);
+  const html = [...agents.values()].map(a => {
+    const status = a.status || 'running';
+    const reasoning = (a.reasoning_steps || []).map(step => `<li>${escapeHtml(step)}</li>`).join('');
+    return `<div class="agent ${escapeHtml(status)}">
+      <div class="agentTop"><span class="agentName">${escapeHtml(a.agent)}</span><span class="badge">${escapeHtml(status)}</span></div>
+      <div class="agentMsg">${escapeHtml(a.message)}</div>
+      <div class="meta"><span class="chip">${escapeHtml(a.phase || 'phase')}</span><span class="chip">${escapeHtml(a.mode || 'sequential')}</span>${a.group ? `<span class="chip">${escapeHtml(a.group)}</span>` : ''}</div>
+      ${reasoning ? `<ol class="reasoning">${reasoning}</ol>` : ''}
+    </div>`;
+  }).join('');
+  timelineEl.innerHTML = html;
+}
+
+async function streamReport(payload) {
+  agents.clear();
+  timelineEl.innerHTML = '';
+  statusEl.textContent = 'Starting workflow stream...';
+  const res = await fetch('/report/stream', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  if (!res.ok || !res.body) {
+    const json = await res.json().catch(() => ({}));
+    throw new Error(json.detail || 'Streaming request failed.');
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const chunks = buffer.split('\n\n');
+    buffer = chunks.pop() || '';
+    for (const chunk of chunks) {
+      const line = chunk.split('\n').find(x => x.startsWith('data: '));
+      if (!line) continue;
+      const event = JSON.parse(line.slice(6));
+      if (event.type === 'agent') {
+        renderAgent(event);
+        statusEl.textContent = `${event.agent}: ${event.message}`;
+      }
+      if (event.type === 'result') {
+        const upside = event.upside_downside == null ? 'n/a' : (event.upside_downside * 100).toFixed(1) + '%';
+        const reportLink = event.report_url ? `<a class="linkButton" href="${event.report_url}" target="_blank">Open HTML report</a>` : '';
+        const modelLink = event.excel_model_url ? `<a class="linkButton" href="${event.excel_model_url}" target="_blank">Download Excel model</a>` : '';
+        statusEl.innerHTML = `Report and model generated.\n\nRecommendation: ${escapeHtml(event.recommendation)}\nTarget price: ${escapeHtml(event.target_price ?? 'n/a')}\nUpside/downside: ${escapeHtml(upside)}<div class="links">${reportLink}${modelLink}</div>`;
+      }
+      if (event.type === 'error') {
+        renderAgent({agent:'Workflow Error', status:'error', phase:'error', mode:'sequential', message:event.detail});
+        statusEl.textContent = 'Error: ' + event.detail;
+      }
+    }
+  }
+}
+
 form.addEventListener('submit', async (e) => {
   e.preventDefault();
-  statusEl.textContent = 'Generating report and Excel model. This may take 30-90 seconds depending on yfinance responses...';
+  submitBtn.disabled = true;
   const data = Object.fromEntries(new FormData(form).entries());
   const peers = data.peers ? data.peers.split(',').map(x => x.trim()).filter(Boolean) : [];
   const payload = {
@@ -74,19 +193,12 @@ form.addEventListener('submit', async (e) => {
     peers
   };
   try {
-    const res = await fetch('/report/initiation', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
-    const json = await res.json();
-    if (!res.ok) throw new Error(json.detail || JSON.stringify(json));
-    const upside = json.upside_downside == null ? 'n/a' : (json.upside_downside * 100).toFixed(1) + '%';
-    const reportLink = json.report_url ? `<a class="linkButton" href="${json.report_url}" target="_blank">Open HTML report</a>` : '';
-    const modelLink = json.excel_model_url ? `<a class="linkButton" href="${json.excel_model_url}" target="_blank">Download Excel model</a>` : '';
-    statusEl.innerHTML = `Report and model generated.\n\nRecommendation: ${json.recommendation}\nTarget price: ${json.target_price ?? 'n/a'}\nUpside/downside: ${upside}<div class="links">${reportLink}${modelLink}</div>`;
+    await streamReport(payload);
   } catch (err) {
     statusEl.textContent = 'Error: ' + err.message;
+    renderAgent({agent:'Workflow Error', status:'error', phase:'error', mode:'sequential', message:err.message});
+  } finally {
+    submitBtn.disabled = false;
   }
 });
 </script>
