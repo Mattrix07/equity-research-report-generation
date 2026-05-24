@@ -55,6 +55,12 @@ class MarketSnapshot(BaseModel):
     beta: float | None = None
     trailing_pe: float | None = None
     forward_pe: float | None = None
+    target_mean_price: float | None = None
+    target_median_price: float | None = None
+    target_high_price: float | None = None
+    target_low_price: float | None = None
+    number_of_analyst_opinions: int | None = None
+    recommendation_mean: float | None = None
     revenue_ttm: float | None = None
     ebitda: float | None = None
     total_cash: float | None = None
