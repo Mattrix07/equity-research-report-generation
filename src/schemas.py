@@ -296,6 +296,7 @@ class FullReport(BaseModel):
     company_evidence: CompanyEvidencePack | None = None
     peer_comps: dict[str, Any] = Field(default_factory=dict)
     dynamic_valuation: DynamicValuationResult | None = None
+    validated_model: Any | None = None
     llm_committee: LLMCommitteeOutput | None = None
     html_path: str | None = None
     excel_model_path: str | None = None
