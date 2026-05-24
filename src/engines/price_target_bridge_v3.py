@@ -2,18 +2,10 @@
 
 A five-year DCF is an intrinsic value output, not automatically a 12-month share
 price target. This bridge keeps the raw DCF visible, but derives the report's
-12-month target from:
-- intrinsic DCF value;
-- observable analyst target fields from the data layer, when available;
-- current price anchor.
-
-If the intrinsic DCF is clearly detached from consensus/current-market context,
-the bridge lowers the DCF weight and flags the model for assumption review rather
-than letting one punitive WACC/terminal-value setup drive a false SELL.
+12-month target from intrinsic DCF value, observable analyst target fields and a
+current-price anchor.
 """
 from __future__ import annotations
-
-from typing import Any
 
 from src.engines.model_validation_engine import ValidatedFinancialModel
 from src.schemas import MarketSnapshot
@@ -23,14 +15,18 @@ DETACHED_ERROR = "Base DCF target is too detached from current share price"
 
 def consensus_target(snapshot: MarketSnapshot) -> float | None:
     if snapshot.target_median_price and snapshot.target_median_price > 0:
-        return snapshot.target_median_price
+        return float(snapshot.target_median_price)
     if snapshot.target_mean_price and snapshot.target_mean_price > 0:
-        return snapshot.target_mean_price
+        return float(snapshot.target_mean_price)
     return None
 
 
+def _safe_text(*values: object) -> str:
+    return " ".join(str(v) for v in values if v is not None).lower()
+
+
 def _is_large_quality_platform(snapshot: MarketSnapshot) -> bool:
-    text = f"{snapshot.ticker} {snapshot.sector} {snapshot.industry} {snapshot.business_summary}".lower()
+    text = _safe_text(snapshot.ticker, snapshot.sector, snapshot.industry, snapshot.business_summary)
     market_cap = snapshot.market_cap or 0
     quality_terms = ["semiconductor", "graphics", "data center", "accelerated computing", "artificial intelligence", "platform", "software", "internet"]
     return market_cap >= 200_000_000_000 and any(term in text for term in quality_terms)
@@ -49,7 +45,6 @@ def _is_detached(snapshot: MarketSnapshot, intrinsic: float | None) -> bool:
 
 
 def _weights(snapshot: MarketSnapshot, intrinsic: float | None, scenario: str) -> tuple[float, float, float]:
-    """Return weights for DCF, current price, consensus target."""
     consensus = consensus_target(snapshot)
     if not snapshot.current_price or not consensus:
         return (1.00, 0.00, 0.00)
@@ -82,17 +77,16 @@ def bridge_price(snapshot: MarketSnapshot, intrinsic: float | None, scenario: st
     return dcf_w * intrinsic + current_w * current + consensus_w * consensus
 
 
-def implied_metrics(model: ValidatedFinancialModel) -> dict[str, float | None]:
+def _implied_metric_values(model: ValidatedFinancialModel) -> tuple[float | None, float | None, float | None]:
     scenario = model.scenarios.get("base")
     if not scenario or not scenario.forecasts:
-        return {}
+        return None, None, None
     dcf = scenario.dcf
     final = scenario.forecasts[-1]
-    return {
-        "implied_ev_to_final_year_ebitda": dcf.enterprise_value / final.ebitda if final.ebitda else None,
-        "implied_ev_to_final_year_fcf": dcf.enterprise_value / final.fcf if final.fcf else None,
-        "terminal_value_percent_of_enterprise_value": dcf.pv_terminal_value / dcf.enterprise_value if dcf.enterprise_value else None,
-    }
+    ev_to_ebitda = dcf.enterprise_value / final.ebitda if final.ebitda else None
+    ev_to_fcf = dcf.enterprise_value / final.fcf if final.fcf else None
+    terminal_pct = dcf.pv_terminal_value / dcf.enterprise_value if dcf.enterprise_value else None
+    return ev_to_ebitda, ev_to_fcf, terminal_pct
 
 
 def apply_price_target_bridge(model: ValidatedFinancialModel, snapshot: MarketSnapshot) -> ValidatedFinancialModel:
@@ -104,6 +98,11 @@ def apply_price_target_bridge(model: ValidatedFinancialModel, snapshot: MarketSn
     bull_target = bridge_price(snapshot, bull_intrinsic, "bull")
     current = snapshot.current_price
     base_weights = _weights(snapshot, base_intrinsic, "base")
+    ev_to_ebitda, ev_to_fcf, terminal_pct = _implied_metric_values(model)
+
+    # Keep valuation_summary scalar-only. Older code stored a nested dict here,
+    # which caused Pydantic serializer warnings because the model schema expects
+    # float-like values.
     model.valuation_summary.update({
         "intrinsic_dcf_bear_target_price": bear_intrinsic,
         "intrinsic_dcf_base_target_price": base_intrinsic,
@@ -116,16 +115,18 @@ def apply_price_target_bridge(model: ValidatedFinancialModel, snapshot: MarketSn
         "analyst_target_median": snapshot.target_median_price,
         "analyst_target_high": snapshot.target_high_price,
         "analyst_target_low": snapshot.target_low_price,
-        "number_of_analyst_opinions": snapshot.number_of_analyst_opinions,
+        "number_of_analyst_opinions": float(snapshot.number_of_analyst_opinions) if snapshot.number_of_analyst_opinions is not None else None,
         "base_bridge_weight_dcf": base_weights[0],
         "base_bridge_weight_current_price": base_weights[1],
         "base_bridge_weight_consensus": base_weights[2],
         "base_upside_downside": (base_target / current - 1) if current and base_target else None,
         "base_intrinsic_dcf_upside_downside": (base_intrinsic / current - 1) if current and base_intrinsic else None,
-        "base_implied_metrics": implied_metrics(model),
+        "base_implied_ev_to_final_year_ebitda": ev_to_ebitda,
+        "base_implied_ev_to_final_year_fcf": ev_to_fcf,
+        "base_terminal_value_percent_of_enterprise_value": terminal_pct,
     })
     _reconcile_validation_gate(model, snapshot)
-    _add_model_warnings(model, snapshot)
+    _add_model_warnings(model, snapshot, ev_to_ebitda)
     return model
 
 
@@ -145,7 +146,7 @@ def _reconcile_validation_gate(model: ValidatedFinancialModel, snapshot: MarketS
             model.validation.is_valid = not model.validation.errors and all(model.validation.checks.values())
 
 
-def _add_model_warnings(model: ValidatedFinancialModel, snapshot: MarketSnapshot) -> None:
+def _add_model_warnings(model: ValidatedFinancialModel, snapshot: MarketSnapshot, ev_to_ebitda: float | None) -> None:
     consensus = consensus_target(snapshot)
     current = snapshot.current_price
     intrinsic = model.valuation_summary.get("intrinsic_dcf_base_target_price")
@@ -154,7 +155,5 @@ def _add_model_warnings(model: ValidatedFinancialModel, snapshot: MarketSnapshot
         model.validation.warnings.append("Intrinsic DCF is materially below analyst consensus; the 12-month target bridge reduces DCF weight and flags WACC/terminal assumptions for review.")
     if current and target and target / current - 1 < -0.30:
         model.validation.warnings.append("12-month target still implies severe downside; explicit bear-case evidence is required before relying on this output.")
-    metrics: dict[str, Any] = model.valuation_summary.get("base_implied_metrics") or {}
-    ev_ebitda = metrics.get("implied_ev_to_final_year_ebitda")
-    if ev_ebitda and ev_ebitda < 10 and _is_large_quality_platform(snapshot):
+    if ev_to_ebitda and ev_to_ebitda < 10 and _is_large_quality_platform(snapshot):
         model.validation.warnings.append("Intrinsic DCF implies a low final-year EV/EBITDA multiple for a large quality platform; review terminal-value method, WACC and growth fade.")
