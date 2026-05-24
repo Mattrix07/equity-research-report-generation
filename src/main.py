@@ -18,9 +18,9 @@ import uvicorn
 
 from src.config import settings
 from src.schemas import ReportRequest
-from src.workflow import generate_report
+from src.workflow_iterative import generate_report
 
-app = FastAPI(title="Equity Research Report Generator", version="0.1.0")
+app = FastAPI(title="Equity Research Report Generator", version="0.2.0")
 
 OUTPUTS_DIR = Path("outputs")
 OUTPUTS_DIR.mkdir(exist_ok=True)
@@ -64,12 +64,6 @@ def create_initiation_report(request: ReportRequest):
 
 @app.post("/report/stream")
 def stream_report(request: ReportRequest):
-    """Stream agent progress events while generating the report.
-
-    This uses server-sent events. The actual workflow remains synchronous, but it
-    runs in a worker thread and pushes structured agent events into a queue for
-    the UI to render live.
-    """
     event_queue: queue.Queue[dict] = queue.Queue()
 
     def emit(event: dict):
@@ -121,7 +115,7 @@ def create_dcf_only(request: ReportRequest):
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    return {"status": "ok", "workflow": "iterative_llm_assisted_model_first"}
 
 
 if __name__ == "__main__":
