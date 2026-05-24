@@ -76,13 +76,47 @@ class MarketSnapshot(BaseModel):
 
 
 class HistoricalFinancials(BaseModel):
+    # Source metadata
+    source: str = "yfinance"
+
+    # Income statement
     revenue: dict[str, float] = Field(default_factory=dict)
+    gross_profit: dict[str, float] = Field(default_factory=dict)
     ebitda: dict[str, float] = Field(default_factory=dict)
     ebit: dict[str, float] = Field(default_factory=dict)
     net_income: dict[str, float] = Field(default_factory=dict)
+    income_tax_expense: dict[str, float] = Field(default_factory=dict)
+    interest_expense: dict[str, float] = Field(default_factory=dict)
+
+    # Cash flow statement
     operating_cash_flow: dict[str, float] = Field(default_factory=dict)
     capex: dict[str, float] = Field(default_factory=dict)
     free_cash_flow: dict[str, float] = Field(default_factory=dict)
+    depreciation_amortization: dict[str, float] = Field(default_factory=dict)
+    stock_based_compensation: dict[str, float] = Field(default_factory=dict)
+    dividends_paid: dict[str, float] = Field(default_factory=dict)
+    share_repurchases: dict[str, float] = Field(default_factory=dict)
+
+    # Balance sheet
+    cash_and_equivalents: dict[str, float] = Field(default_factory=dict)
+    short_term_investments: dict[str, float] = Field(default_factory=dict)
+    receivables: dict[str, float] = Field(default_factory=dict)
+    inventory: dict[str, float] = Field(default_factory=dict)
+    total_current_assets: dict[str, float] = Field(default_factory=dict)
+    ppne: dict[str, float] = Field(default_factory=dict)
+    goodwill: dict[str, float] = Field(default_factory=dict)
+    intangible_assets: dict[str, float] = Field(default_factory=dict)
+    total_assets: dict[str, float] = Field(default_factory=dict)
+    accounts_payable: dict[str, float] = Field(default_factory=dict)
+    short_term_debt: dict[str, float] = Field(default_factory=dict)
+    long_term_debt: dict[str, float] = Field(default_factory=dict)
+    total_debt: dict[str, float] = Field(default_factory=dict)
+    total_current_liabilities: dict[str, float] = Field(default_factory=dict)
+    total_liabilities: dict[str, float] = Field(default_factory=dict)
+    shareholders_equity: dict[str, float] = Field(default_factory=dict)
+    shares_outstanding: dict[str, float] = Field(default_factory=dict)
+
+    # Derived metrics
     gross_margin: dict[str, float] = Field(default_factory=dict)
     ebitda_margin: dict[str, float] = Field(default_factory=dict)
     fcf_margin: dict[str, float] = Field(default_factory=dict)
